@@ -105,7 +105,7 @@ After the sync process is initialized, it will be in a state of verification, on
 #![doc = simple_mermaid::mermaid!("../diagrams/process_scan_results.mmd")]
 
 pub(crate) mod client;
-pub(crate) mod activation;
+pub mod activation;
 pub mod config;
 pub mod error;
 pub mod keys;

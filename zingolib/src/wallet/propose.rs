@@ -16,7 +16,7 @@ use super::{
     LightWallet,
     error::{ProposeSendError, ProposeShieldError, WalletError},
 };
-use crate::config::ChainType;
+use crate::{config::ChainType, wallet::keys::unified::ReceiverSelection};
 use pepper_sync::{keys::transparent::TransparentScope, sync::ScanPriority};
 
 impl LightWallet {
@@ -75,11 +75,20 @@ impl LightWallet {
         &mut self,
         account_id: zip32::AccountId,
     ) -> Result<crate::data::proposal::ProportionalFeeShieldProposal, ProposeShieldError> {
+        if !self
+            .unified_addresses
+            .values()
+            .any(|address| address.sapling().is_some())
+        {
+            self.generate_unified_address(ReceiverSelection::sapling_only(), zip32::AccountId::ZERO)
+                .expect("wallet should be able to derive a Sapling receiver for shielding change");
+        }
+
         let input_selector = GreedyInputSelector::new();
         let change_strategy = zcash_client_backend::fees::zip317::SingleOutputChangeStrategy::new(
             zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
             None,
-            ShieldedProtocol::Orchard,
+            ShieldedProtocol::Sapling,
             DustOutputPolicy::new(DustAction::AllowDustChange, None),
         );
         let network = self.network;

@@ -27,6 +27,8 @@ use zcash_primitives::consensus::{
     BlockHeight, MAIN_NETWORK, NetworkType, NetworkUpgrade, Parameters, TEST_NETWORK,
 };
 
+use pepper_sync::activation;
+
 use crate::wallet::WalletSettings;
 
 /// TODO: Add Doc Comment Here!
@@ -78,7 +80,8 @@ impl Parameters for ChainType {
 
     fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
         use ChainType::{Mainnet, Regtest, Testnet};
-        match self {
+
+        let base = match self {
             Testnet => TEST_NETWORK.activation_height(nu),
             Mainnet => MAIN_NETWORK.activation_height(nu),
             Regtest(activation_heights) => match nu {
@@ -95,6 +98,13 @@ impl Parameters for ChainType {
                 NetworkUpgrade::Nu6 => activation_heights.nu6.map(BlockHeight::from_u32),
                 NetworkUpgrade::Nu6_1 => activation_heights.nu6_1.map(BlockHeight::from_u32),
             },
+        };
+
+        match nu {
+            NetworkUpgrade::Overwinter => activation::overwinter_height_or(base),
+            NetworkUpgrade::Sapling => activation::sapling_height_or(base),
+            NetworkUpgrade::Nu5 => activation::orchard_height_or(base),
+            _ => base,
         }
     }
 }

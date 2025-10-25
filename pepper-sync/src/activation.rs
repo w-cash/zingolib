@@ -9,6 +9,8 @@ static SAPLING_MANUAL_OVERRIDE: OnceLock<Option<BlockHeight>> = OnceLock::new();
 static SAPLING_ENV_OVERRIDE: OnceLock<Option<BlockHeight>> = OnceLock::new();
 static ORCHARD_MANUAL_OVERRIDE: OnceLock<Option<BlockHeight>> = OnceLock::new();
 static ORCHARD_ENV_OVERRIDE: OnceLock<Option<BlockHeight>> = OnceLock::new();
+static OVERWINTER_MANUAL_OVERRIDE: OnceLock<Option<BlockHeight>> = OnceLock::new();
+static OVERWINTER_ENV_OVERRIDE: OnceLock<Option<BlockHeight>> = OnceLock::new();
 
 fn parse_override(var_name: &str) -> Option<BlockHeight> {
     match std::env::var(var_name) {
@@ -47,6 +49,16 @@ fn orchard_override() -> Option<BlockHeight> {
         .clone()
 }
 
+fn overwinter_override() -> Option<BlockHeight> {
+    if let Some(Some(height)) = OVERWINTER_MANUAL_OVERRIDE.get().copied() {
+        return Some(height);
+    }
+
+    OVERWINTER_ENV_OVERRIDE
+        .get_or_init(|| parse_override("ZINGO_OVERWINTER_ACTIVATION_HEIGHT"))
+        .clone()
+}
+
 /// Returns the activation height for Sapling, applying runtime overrides when present.
 pub(crate) fn sapling_activation_height(
     consensus_parameters: &impl consensus::Parameters,
@@ -66,6 +78,17 @@ pub(crate) fn orchard_activation_height(
         consensus_parameters
             .activation_height(consensus::NetworkUpgrade::Nu5)
             .expect("nu5 activation height should always return Some")
+    })
+}
+
+/// Returns the activation height for Overwinter, applying runtime overrides when present.
+pub(crate) fn overwinter_activation_height(
+    consensus_parameters: &impl consensus::Parameters,
+) -> BlockHeight {
+    overwinter_override().unwrap_or_else(|| {
+        consensus_parameters
+            .activation_height(consensus::NetworkUpgrade::Overwinter)
+            .expect("overwinter activation height should always return Some")
     })
 }
 
@@ -125,4 +148,45 @@ pub fn set_orchard_activation_height(height: BlockHeight) {
     if ORCHARD_MANUAL_OVERRIDE.set(Some(height)).is_err() {
         warn!("Failed to set orchard activation height override");
     }
+}
+
+/// Sets a runtime override for the Overwinter activation height.
+pub fn set_overwinter_activation_height(height: BlockHeight) {
+    if let Some(existing) = OVERWINTER_MANUAL_OVERRIDE.get().copied().flatten() {
+        if existing != height {
+            warn!(
+                "Overwinter activation height override already set to {:?}, ignoring new value {:?}",
+                existing, height
+            );
+        }
+        return;
+    }
+
+    if let Some(env_height) = OVERWINTER_ENV_OVERRIDE
+        .get_or_init(|| parse_override("ZINGO_OVERWINTER_ACTIVATION_HEIGHT"))
+        .clone()
+    {
+        if env_height != height {
+            warn!(
+                "Environment override for Overwinter activation height ({env_height}) present; ignoring server value {height}"
+            );
+        }
+        return;
+    }
+
+    if OVERWINTER_MANUAL_OVERRIDE.set(Some(height)).is_err() {
+        warn!("Failed to set Overwinter activation height override");
+    }
+}
+
+pub fn sapling_height_or(base: Option<BlockHeight>) -> Option<BlockHeight> {
+    sapling_override().or(base)
+}
+
+pub fn orchard_height_or(base: Option<BlockHeight>) -> Option<BlockHeight> {
+    orchard_override().or(base)
+}
+
+pub fn overwinter_height_or(base: Option<BlockHeight>) -> Option<BlockHeight> {
+    overwinter_override().or(base)
 }

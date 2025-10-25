@@ -27,7 +27,7 @@ use crate::{
     sync::ScanRange,
     wallet::{
         InitialSyncState, ScanTarget, SyncState, TreeBounds, WalletTransaction,
-        traits::{SyncBlocks, SyncNullifiers, SyncWallet},
+        traits::{SyncBlocks, SyncNullifiers, SyncShardTrees, SyncWallet},
     },
 };
 
@@ -761,7 +761,7 @@ pub(super) async fn set_initial_state<W>(
     chain_height: BlockHeight,
 ) -> Result<(), SyncError<W::Error>>
 where
-    W: SyncWallet + SyncBlocks,
+    W: SyncWallet + SyncBlocks + SyncShardTrees,
 {
     let sync_state = wallet.get_sync_state().map_err(SyncError::WalletError)?;
     let birthday = sync_state
@@ -815,6 +815,21 @@ where
         previously_scanned_sapling_outputs,
         previously_scanned_orchard_outputs,
     };
+
+    // Ensure shard trees have checkpoints up to the current chain height even if no
+    // subtree roots have been fetched (for example, on chains with zero Orchard
+    // activity yet). This allows downstream transaction builders to obtain anchors
+    // based on the empty commitment trees.
+    if let Ok(shard_trees) = wallet.get_shard_trees_mut() {
+        shard_trees
+            .sapling
+            .checkpoint(chain_height)
+            .expect("sapling checkpoint insertion should not fail");
+        shard_trees
+            .orchard
+            .checkpoint(chain_height)
+            .expect("orchard checkpoint insertion should not fail");
+    }
 
     Ok(())
 }

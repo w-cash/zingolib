@@ -54,6 +54,7 @@ For short/lightweight chains, override activation heights before starting the CL
 
 ```bash
 cd /path/to/zingolib
+ZINGO_OVERWINTER_ACTIVATION_HEIGHT=1 \
 ZINGO_SAPLING_ACTIVATION_HEIGHT=1 \
 ZINGO_ORCHARD_ACTIVATION_HEIGHT=1 \
 ./target/release/zingo-cli \
@@ -64,6 +65,7 @@ ZINGO_ORCHARD_ACTIVATION_HEIGHT=1 \
 Restoring from a seed requires a birthday:
 
 ```bash
+ZINGO_OVERWINTER_ACTIVATION_HEIGHT=1 \
 ZINGO_SAPLING_ACTIVATION_HEIGHT=1 \
 ZINGO_ORCHARD_ACTIVATION_HEIGHT=1 \
 ./target/release/zingo-cli \
