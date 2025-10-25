@@ -316,21 +316,28 @@ pub trait SyncShardTrees: SyncWallet {
         &mut self,
         truncate_height: BlockHeight,
     ) -> Result<(), SyncError<Self::Error>> {
-        if !self
+        let shard_trees = self
             .get_shard_trees_mut()
-            .map_err(SyncError::WalletError)?
+            .map_err(SyncError::WalletError)?;
+
+        if !shard_trees
             .sapling
             .truncate_to_checkpoint(&truncate_height)?
         {
-            panic!("max checkpoints should always be higher or equal to max verification window!");
+            tracing::debug!(
+                "No Sapling checkpoints above {} to truncate",
+                u32::from(truncate_height)
+            );
         }
-        if !self
-            .get_shard_trees_mut()
-            .map_err(SyncError::WalletError)?
+
+        if !shard_trees
             .orchard
             .truncate_to_checkpoint(&truncate_height)?
         {
-            panic!("max checkpoints should always be higher or equal to max verification window!");
+            tracing::debug!(
+                "No Orchard checkpoints above {} to truncate",
+                u32::from(truncate_height)
+            );
         }
 
         Ok(())

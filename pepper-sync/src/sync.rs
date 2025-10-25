@@ -22,6 +22,7 @@ use zcash_protocol::consensus::{self, BlockHeight};
 
 use zingo_status::confirmation_status::ConfirmationStatus;
 
+use crate::activation::sapling_activation_height;
 use crate::client::{self, FetchRequest};
 use crate::config::SyncConfig;
 use crate::error::{
@@ -1404,11 +1405,7 @@ where
 {
     let birthday =
         checked_birthday(consensus_parameters, wallet).map_err(SyncError::WalletError)?;
-    if birthday
-        == consensus_parameters
-            .activation_height(consensus::NetworkUpgrade::Sapling)
-            .expect("sapling activation height should always return Some")
-    {
+    if birthday == sapling_activation_height(consensus_parameters) {
         return Ok(());
     }
 
@@ -1456,9 +1453,7 @@ fn checked_birthday<W: SyncWallet>(
     wallet: &W,
 ) -> Result<BlockHeight, W::Error> {
     let wallet_birthday = wallet.get_birthday()?;
-    let sapling_activation_height = consensus_parameters
-        .activation_height(consensus::NetworkUpgrade::Sapling)
-        .expect("sapling activation height should always return Some");
+    let sapling_activation_height = sapling_activation_height(consensus_parameters);
 
     match wallet_birthday.cmp(&sapling_activation_height) {
         cmp::Ordering::Greater | cmp::Ordering::Equal => Ok(wallet_birthday),

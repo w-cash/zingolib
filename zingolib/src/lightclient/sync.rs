@@ -7,7 +7,10 @@ use std::time::Duration;
 use futures::FutureExt;
 use pepper_sync::error::SyncError;
 use pepper_sync::error::SyncModeError;
+use pepper_sync::set_sapling_activation_height;
 use pepper_sync::wallet::SyncMode;
+use tracing::warn;
+use zcash_protocol::consensus::BlockHeight;
 
 use crate::data::PollReport;
 use crate::wallet::error::WalletError;
@@ -27,7 +30,21 @@ impl LightClient {
             ));
         }
 
-        let client = crate::grpc_client::get_zcb_client(self.config.get_lightwalletd_uri()).await?;
+        let server_uri = self.config.get_lightwalletd_uri();
+        if let Ok(info) = crate::grpc_connector::get_info(server_uri.clone()).await {
+            if info.sapling_activation_height <= u64::from(u32::MAX) {
+                set_sapling_activation_height(BlockHeight::from_u32(
+                    info.sapling_activation_height as u32,
+                ));
+            } else {
+                warn!(
+                    "Sapling activation height {} reported by server exceeds u32 range",
+                    info.sapling_activation_height
+                );
+            }
+        }
+
+        let client = crate::grpc_client::get_zcb_client(server_uri).await?;
         let wallet_guard = self.wallet.read().await;
         let network = wallet_guard.network;
         let sync_config = wallet_guard.wallet_settings.sync_config.clone();

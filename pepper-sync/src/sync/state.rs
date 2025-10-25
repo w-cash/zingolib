@@ -11,10 +11,14 @@ use tokio::sync::mpsc;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
     ShieldedProtocol,
-    consensus::{self, BlockHeight, NetworkUpgrade},
+    consensus::{self, BlockHeight},
 };
 
 use crate::{
+    activation::{
+        orchard_activation_height as consensus_orchard_activation_height,
+        sapling_activation_height as consensus_sapling_activation_height,
+    },
     client::{self, FetchRequest},
     config::PerformanceLevel,
     error::{ServerError, SyncError},
@@ -425,25 +429,19 @@ fn determine_block_range(
     shielded_protocol: Option<ShieldedProtocol>,
 ) -> Range<BlockHeight> {
     if let Some(mut shielded_protocol) = shielded_protocol {
+        let sapling_activation_height = consensus_sapling_activation_height(consensus_parameters);
+        let orchard_activation_height = consensus_orchard_activation_height(consensus_parameters);
         loop {
             match shielded_protocol {
                 ShieldedProtocol::Sapling => {
-                    if block_height
-                        < consensus_parameters
-                            .activation_height(consensus::NetworkUpgrade::Sapling)
-                            .expect("network activation height should be set")
-                    {
+                    if block_height < sapling_activation_height {
                         panic!("pre-sapling not supported");
                     } else {
                         break;
                     }
                 }
                 ShieldedProtocol::Orchard => {
-                    if block_height
-                        < consensus_parameters
-                            .activation_height(consensus::NetworkUpgrade::Nu5)
-                            .expect("network activation height should be set")
-                    {
+                    if block_height < orchard_activation_height {
                         shielded_protocol = ShieldedProtocol::Sapling;
                     } else {
                         break;
@@ -877,9 +875,8 @@ where
         ))
     } else {
         // TODO: move this whole block into `client::get_frontiers`
-        let sapling_activation_height = consensus_parameters
-            .activation_height(NetworkUpgrade::Sapling)
-            .expect("should have some sapling activation height");
+        let sapling_activation_height =
+            consensus_sapling_activation_height(consensus_parameters);
 
         match block_height.cmp(&(sapling_activation_height - 1)) {
             cmp::Ordering::Greater => {
@@ -938,12 +935,12 @@ pub(super) fn add_shard_ranges(
     subtree_roots: &[SubtreeRoot],
 ) {
     let network_upgrade_activation_height = match shielded_protocol {
-        ShieldedProtocol::Sapling => consensus_parameters
-            .activation_height(consensus::NetworkUpgrade::Sapling)
-            .expect("activation height should exist for this network upgrade!"),
-        ShieldedProtocol::Orchard => consensus_parameters
-            .activation_height(consensus::NetworkUpgrade::Nu5)
-            .expect("activation height should exist for this network upgrade!"),
+        ShieldedProtocol::Sapling => {
+            consensus_sapling_activation_height(consensus_parameters)
+        }
+        ShieldedProtocol::Orchard => {
+            consensus_orchard_activation_height(consensus_parameters)
+        }
     };
 
     let shard_ranges: &mut Vec<Range<BlockHeight>> = match shielded_protocol {

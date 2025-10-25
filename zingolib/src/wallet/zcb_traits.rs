@@ -782,7 +782,7 @@ impl InputSource for LightWallet {
     ) -> Result<Vec<WalletTransparentOutput>, Self::Error> {
         let address = transparent::encode_address(&self.network, *address);
 
-        Ok(self
+        let outputs: Vec<_> = self
             .spendable_transparent_coins(
                 target_height.into(),
                 min_confirmations.allow_zero_conf_shielding(),
@@ -804,6 +804,8 @@ impl InputSource for LightWallet {
                     ),
                 )
             })
-            .collect())
+            .collect();
+
+        Ok(outputs)
     }
 }

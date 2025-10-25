@@ -48,6 +48,42 @@ cargo build --release --package zingo-cli
 
 This will launch the interactive prompt. Type `help` to get a list of commands.
 
+### Quick workflow (dev chain)
+
+For short/lightweight chains, override activation heights before starting the CLI:
+
+```bash
+cd /path/to/zingolib
+ZINGO_SAPLING_ACTIVATION_HEIGHT=1 \
+ZINGO_ORCHARD_ACTIVATION_HEIGHT=1 \
+./target/release/zingo-cli \
+    --server 127.0.0.1:9067 \
+    --data-dir /path/to/wallet-data
+```
+
+Restoring from a seed requires a birthday:
+
+```bash
+ZINGO_SAPLING_ACTIVATION_HEIGHT=1 \
+ZINGO_ORCHARD_ACTIVATION_HEIGHT=1 \
+./target/release/zingo-cli \
+    --server 127.0.0.1:9067 \
+    --data-dir /path/to/wallet-data \
+    --seed "word1 … word24" \
+    --birthday 0
+```
+
+Common command sequence inside the prompt:
+
+1. `sync run` – ensure the background sync task is running.
+2. `balance` – inspect confirmed/unconfirmed totals.
+3. `coins` – list transparent UTXOs and the block height they were mined in.
+4. Wait for coinbase rewards to mature (`coin_height + 100`) before shielding.
+5. `shield` then `confirm` (or `quickshield`) – move transparent funds into Orchard.
+6. `sync status` – monitor progress and confirmation counts.
+
+> **Note:** Miner (coinbase) rewards cannot be spent until they are 100 blocks deep. Compare the height shown by `coins` with the current chain `height` to know when shielding will succeed.
+
 ## Notes:
 * If you want to run your own server, please see [zingo lightwalletd](https://github.com/zingolabs/lightwalletd), and then run `./zingo-cli --server http://127.0.0.1:9067`
 * The default log file is in `~/.zcash/zingo-wallet.debug.log`. A default wallet is stored in `~/.zcash/zingo-wallet.dat`

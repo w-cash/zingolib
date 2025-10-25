@@ -16,6 +16,7 @@ use zcash_primitives::{block::BlockHash, zip32::AccountId};
 use zcash_protocol::consensus::{self, BlockHeight};
 
 use crate::{
+    activation::sapling_activation_height as consensus_sapling_activation_height,
     client::{self, FetchRequest},
     error::{ContinuityError, ScanError, ServerError},
     keys::{KeyId, ScanningKeyOps, ScanningKeys},
@@ -426,10 +427,8 @@ pub(crate) async fn calculate_block_tree_bounds(
                 chain_metadata.orchard_commitment_tree_size,
             )
         } else {
-            let sapling_activation_height = consensus_parameters
-                .activation_height(consensus::NetworkUpgrade::Sapling)
-                .expect("should have some sapling activation height");
-
+            let sapling_activation_height =
+                consensus_sapling_activation_height(consensus_parameters);
             match compact_block.height().cmp(&sapling_activation_height) {
                 cmp::Ordering::Greater => {
                     let frontiers =
