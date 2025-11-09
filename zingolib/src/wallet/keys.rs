@@ -51,27 +51,61 @@ impl LightWallet {
         &mut self,
         receivers: ReceiverSelection,
         account_id: zip32::AccountId,
+        target_index: Option<u32>,
     ) -> Result<(UnifiedAddressId, UnifiedAddress), KeyError> {
-        let address_id = UnifiedAddressId {
+        let current_max = self
+            .unified_addresses
+            .keys()
+            .filter(|&address_id| address_id.account_id == account_id)
+            .map(|address_id| address_id.address_index)
+            .max();
+        let next_index = current_max.map_or(0, |max| max + 1);
+
+        let desired_index = target_index.unwrap_or(next_index);
+
+        if let Some(existing) = self.unified_addresses.get(&UnifiedAddressId {
             account_id,
-            address_index: self
-                .unified_addresses
-                .keys()
-                .filter(|&address_id| address_id.account_id == account_id)
-                .map(|&address_id| address_id.address_index)
-                .max()
-                .map_or(0, |address_id| address_id + 1),
-        };
-        let unified_address = self
+            address_index: desired_index,
+        }) {
+            return Ok((
+                UnifiedAddressId {
+                    account_id,
+                    address_index: desired_index,
+                },
+                existing.clone(),
+            ));
+        }
+
+        let key_store = self
             .unified_key_store
             .get(&account_id)
-            .ok_or(KeyError::NoAccountKeys)?
-            .generate_unified_address(address_id.address_index, receivers)?;
-        self.unified_addresses
-            .insert(address_id, unified_address.clone());
+            .ok_or(KeyError::NoAccountKeys)?;
+
+        let start = current_max.map_or(0, |idx| idx + 1);
+        let mut generated_address = None;
+        for index in start..=desired_index {
+            let unified_address = key_store.generate_unified_address(index, receivers)?;
+            self.unified_addresses.insert(
+                UnifiedAddressId {
+                    account_id,
+                    address_index: index,
+                },
+                unified_address.clone(),
+            );
+            if index == desired_index {
+                generated_address = Some(unified_address);
+            }
+        }
+
         self.save_required = true;
 
-        Ok((address_id, unified_address))
+        Ok((
+            UnifiedAddressId {
+                account_id,
+                address_index: desired_index,
+            },
+            generated_address.expect("target index should be generated"),
+        ))
     }
 
     /// Generates a new transparent address of `external` scope for the given `account_id`.
@@ -82,6 +116,7 @@ impl LightWallet {
         &mut self,
         account_id: zip32::AccountId,
         enforce_no_gap: bool,
+        target_index: Option<NonHardenedChildIndex>,
     ) -> Result<(TransparentAddressId, TransparentAddress), KeyError> {
         let latest_address = self
             .transparent_addresses
@@ -91,7 +126,14 @@ impl LightWallet {
                     && address_id.account_id() == account_id
             })
             .max_by_key(|(address_id, _)| address_id.address_index());
+
+        let key_store = self
+            .unified_key_store
+            .get(&account_id)
+            .ok_or(KeyError::NoAccountKeys)?;
+
         if enforce_no_gap
+            && target_index.is_none()
             && let Some((_, address)) = latest_address
             && !self
                 .wallet_outputs::<TransparentCoin>()
@@ -101,27 +143,68 @@ impl LightWallet {
             return Err(KeyError::GapError);
         }
 
-        let address_index =
-            latest_address.map_or(Ok(NonHardenedChildIndex::ZERO), |(address_index, _)| {
-                address_index
-                    .address_index()
-                    .next()
-                    .ok_or(KeyError::InvalidNonHardenedChildIndex)
-            })?;
-        let address_id =
-            TransparentAddressId::new(account_id, TransparentScope::External, address_index);
-        let external_address = self
-            .unified_key_store
-            .get(&account_id)
-            .ok_or(KeyError::NoAccountKeys)?
-            .generate_transparent_address(address_id.address_index(), address_id.scope())?;
-        self.transparent_addresses.insert(
-            address_id,
-            transparent::encode_address(&self.network, external_address),
-        );
-        self.save_required = true;
+        if let Some(target_index) = target_index {
+            if enforce_no_gap {
+                let next_index = latest_address
+                    .map(|(address_id, _)| address_id.address_index())
+                    .and_then(|index| index.next())
+                    .unwrap_or(NonHardenedChildIndex::ZERO);
+                if target_index.index() > next_index.index() {
+                    return Err(KeyError::GapError);
+                }
+            }
 
-        Ok((address_id, external_address))
+            if self
+                .transparent_addresses
+                .contains_key(&TransparentAddressId::new(
+                    account_id,
+                    TransparentScope::External,
+                    target_index,
+                ))
+            {
+                return Ok((
+                    TransparentAddressId::new(account_id, TransparentScope::External, target_index),
+                    key_store
+                        .generate_transparent_address(target_index, TransparentScope::External)?,
+                ));
+            }
+        }
+
+        let start_index = latest_address
+            .map(|(address_id, _)| address_id.address_index())
+            .and_then(|index| index.next())
+            .unwrap_or(NonHardenedChildIndex::ZERO);
+
+        let target_index = target_index.unwrap_or(start_index);
+
+        let mut current_index = start_index;
+        loop {
+            let address_id =
+                TransparentAddressId::new(account_id, TransparentScope::External, current_index);
+            if !self.transparent_addresses.contains_key(&address_id) {
+                let external_address = key_store
+                    .generate_transparent_address(address_id.address_index(), address_id.scope())?;
+
+                self.transparent_addresses.insert(
+                    address_id,
+                    transparent::encode_address(&self.network, external_address),
+                );
+
+                if current_index == target_index {
+                    self.save_required = true;
+                    return Ok((address_id, external_address));
+                }
+            } else if current_index == target_index {
+                let address = key_store
+                    .generate_transparent_address(address_id.address_index(), address_id.scope())?;
+                self.save_required = true;
+                return Ok((address_id, address));
+            }
+
+            current_index = current_index
+                .next()
+                .ok_or(KeyError::InvalidNonHardenedChildIndex)?;
+        }
     }
 
     /// Generates 'n' new transparent addresses of `refund` (ephemeral) scope for the given `account_id`.

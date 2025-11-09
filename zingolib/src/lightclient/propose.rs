@@ -14,6 +14,7 @@ use crate::data::receivers::transaction_request_from_receivers;
 use crate::lightclient::LightClient;
 use crate::wallet::error::ProposeSendError;
 use crate::wallet::error::ProposeShieldError;
+use crate::wallet::restrictions::{ShieldedAddressRestriction, TransparentAddressRestriction};
 
 impl LightClient {
     pub(super) fn append_zingo_zenny_receiver(&self, receivers: &mut Vec<Receiver>) {
@@ -37,12 +38,13 @@ impl LightClient {
         &mut self,
         request: TransactionRequest,
         account_id: zip32::AccountId,
+        restriction: Option<ShieldedAddressRestriction>,
     ) -> Result<ProportionalFeeProposal, ProposeSendError> {
         let proposal = self
             .wallet
             .write()
             .await
-            .create_send_proposal(request, account_id)
+            .create_send_proposal(request, account_id, restriction.clone())
             .await?;
         self.store_proposal(ZingoProposal::Send {
             proposal: proposal.clone(),
@@ -60,9 +62,15 @@ impl LightClient {
         zennies_for_zingo: bool,
         memo: Option<zcash_primitives::memo::MemoBytes>,
         account_id: zip32::AccountId,
+        restriction: Option<ShieldedAddressRestriction>,
     ) -> Result<ProportionalFeeProposal, ProposeSendError> {
         let max_send_value = self
-            .max_send_value(address.clone(), zennies_for_zingo, account_id)
+            .max_send_value(
+                address.clone(),
+                zennies_for_zingo,
+                account_id,
+                restriction.clone(),
+            )
             .await?;
         if max_send_value == Zatoshis::ZERO {
             return Err(ProposeSendError::ZeroValueSendAll);
@@ -77,7 +85,7 @@ impl LightClient {
             .wallet
             .write()
             .await
-            .create_send_proposal(request, account_id)
+            .create_send_proposal(request, account_id, restriction.clone())
             .await?;
         self.store_proposal(ZingoProposal::Send {
             proposal: proposal.clone(),
@@ -92,12 +100,13 @@ impl LightClient {
     pub async fn propose_shield(
         &mut self,
         account_id: zip32::AccountId,
+        restriction: Option<TransparentAddressRestriction>,
     ) -> Result<ProportionalFeeShieldProposal, ProposeShieldError> {
         let proposal = self
             .wallet
             .write()
             .await
-            .create_shield_proposal(account_id)
+            .create_shield_proposal(account_id, restriction.clone())
             .await?;
         self.store_proposal(ZingoProposal::Shield {
             proposal: proposal.clone(),
@@ -126,6 +135,7 @@ impl LightClient {
         address: ZcashAddress,
         zennies_for_zingo: bool,
         account_id: zip32::AccountId,
+        restriction: Option<ShieldedAddressRestriction>,
     ) -> Result<Zatoshis, ProposeSendError> {
         let mut wallet = self.wallet.write().await;
         let confirmed_balance = wallet.shielded_spendable_balance(account_id, false)?;
@@ -137,7 +147,9 @@ impl LightClient {
                 self.append_zingo_zenny_receiver(&mut receivers);
             }
             let request = transaction_request_from_receivers(receivers)?;
-            let trial_proposal = wallet.create_send_proposal(request, account_id).await;
+            let trial_proposal = wallet
+                .create_send_proposal(request, account_id, restriction.clone())
+                .await;
 
             match trial_proposal {
                 Err(ProposeSendError::Proposal(

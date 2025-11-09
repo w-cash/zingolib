@@ -383,6 +383,7 @@ where
             wallet_notes.push(WalletNote {
                 output_id,
                 key_id: key_ids[key_index],
+                diversifier_index: None,
                 note,
                 nullifier,
                 position,

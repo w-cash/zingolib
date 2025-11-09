@@ -479,14 +479,14 @@ impl TransparentCoin {
 
 impl<N, Nf: Copy> WalletNote<N, Nf> {
     fn serialized_version() -> u8 {
-        0
+        1
     }
 }
 
 impl SaplingNote {
     /// Deserialize into `reader`
     pub fn read<R: Read>(mut reader: R) -> std::io::Result<Self> {
-        let _version = reader.read_u8()?;
+        let version = reader.read_u8()?;
 
         let txid = TxId::read(&mut reader)?;
         let output_index = reader.read_u16::<LittleEndian>()?;
@@ -506,6 +506,15 @@ impl SaplingNote {
                 "invalid scope value",
             )),
         }?;
+        let diversifier_index = if version >= 1 {
+            Optional::read(&mut reader, |r| {
+                let mut bytes = [0u8; 11];
+                r.read_exact(&mut bytes)?;
+                Ok(zip32::DiversifierIndex::from(bytes))
+            })?
+        } else {
+            None
+        };
 
         let mut address_bytes = [0u8; 43];
         reader.read_exact(&mut address_bytes)?;
@@ -561,6 +570,7 @@ impl SaplingNote {
         Ok(Self {
             output_id: OutputId::new(txid, output_index),
             key_id: KeyId::from_parts(account_id, scope),
+            diversifier_index,
             note: sapling_crypto::Note::from_parts(recipient, value, rseed),
             nullifier,
             position,
@@ -578,6 +588,9 @@ impl SaplingNote {
 
         writer.write_u32::<LittleEndian>(self.key_id.account_id.into())?;
         writer.write_u8(self.key_id.scope as u8)?;
+        Optional::write(&mut writer, self.diversifier_index.as_ref(), |w, index| {
+            w.write_all(index.as_bytes())
+        })?;
 
         writer.write_all(&self.note.recipient().to_bytes())?;
         writer.write_u64::<LittleEndian>(self.value())?;
@@ -609,7 +622,7 @@ impl SaplingNote {
 impl OrchardNote {
     /// Deserialize into `reader`
     pub fn read<R: Read>(mut reader: R) -> std::io::Result<Self> {
-        let _version = reader.read_u8()?;
+        let version = reader.read_u8()?;
 
         let txid = TxId::read(&mut reader)?;
         let output_index = reader.read_u16::<LittleEndian>()?;
@@ -629,6 +642,15 @@ impl OrchardNote {
                 "invalid scope value",
             )),
         }?;
+        let diversifier_index = if version >= 1 {
+            Optional::read(&mut reader, |r| {
+                let mut bytes = [0u8; 11];
+                r.read_exact(&mut bytes)?;
+                Ok(zip32::DiversifierIndex::from(bytes))
+            })?
+        } else {
+            None
+        };
 
         let mut address_bytes = [0u8; 43];
         reader.read_exact(&mut address_bytes)?;
@@ -667,6 +689,7 @@ impl OrchardNote {
         Ok(Self {
             output_id: OutputId::new(txid, output_index),
             key_id: KeyId::from_parts(account_id, scope),
+            diversifier_index,
             note: orchard::note::Note::from_parts(recipient, value, rho, rseed)
                 .expect("should be a valid orchard note"),
             nullifier,
@@ -685,6 +708,9 @@ impl OrchardNote {
 
         writer.write_u32::<LittleEndian>(self.key_id.account_id.into())?;
         writer.write_u8(self.key_id.scope as u8)?;
+        Optional::write(&mut writer, self.diversifier_index.as_ref(), |w, index| {
+            w.write_all(index.as_bytes())
+        })?;
 
         writer.write_all(&self.note.recipient().to_raw_address_bytes())?;
         writer.write_u64::<LittleEndian>(self.value())?;

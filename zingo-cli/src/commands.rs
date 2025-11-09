@@ -19,6 +19,7 @@ use tokio::runtime::Runtime;
 use zcash_address::unified::{Container, Encoding, Ufvk};
 use zcash_keys::address::Address;
 use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_primitives::legacy::keys::NonHardenedChildIndex;
 use zcash_protocol::consensus::NetworkType;
 use zcash_protocol::value::Zatoshis;
 
@@ -641,6 +642,11 @@ impl Command for BalanceCommand {
     fn help(&self) -> &'static str {
         indoc! {r"
             Return the wallet ZEC balance for each pool (account 0).
+
+            Usage:
+            balance
+            OR
+            balance <address_index>
         "}
     }
 
@@ -648,7 +654,34 @@ impl Command for BalanceCommand {
         "Return the wallet ZEC balance for each pool (account 0)."
     }
 
-    fn exec(&self, _args: &[&str], lightclient: &mut LightClient) -> String {
+    fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
+        if args.len() > 1 {
+            return "Error: balance expects zero or one argument. Try 'help balance' for usage."
+                .to_string();
+        }
+
+        if let Some(index_arg) = args.get(0) {
+            let index = match index_arg.parse::<u32>() {
+                Ok(i) => i,
+                Err(_) => {
+                    return format!(
+                        "Error: '{}' is not a valid address index. Try 'help balance' for usage.",
+                        index_arg
+                    );
+                }
+            };
+
+            return RT.block_on(async move {
+                match lightclient
+                    .account_balance_for_index_range(zip32::AccountId::ZERO, index, index)
+                    .await
+                {
+                    Ok(bal) => format!("index {index}:\n{bal}"),
+                    Err(e) => format!("Error: {e}"),
+                }
+            });
+        }
+
         RT.block_on(async move {
             match lightclient.account_balance(zip32::AccountId::ZERO).await {
                 Ok(bal) => bal.to_string(),
@@ -716,7 +749,8 @@ impl Command for MaxSendValueCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        let (address, zennies_for_zingo) = match utils::parse_max_send_value_args(args) {
+        let (address, zennies_for_zingo, restriction) = match utils::parse_max_send_value_args(args)
+        {
             Ok(address_and_zennies) => address_and_zennies,
             Err(e) => {
                 return format!(
@@ -726,7 +760,12 @@ impl Command for MaxSendValueCommand {
         };
         RT.block_on(async move {
             match lightclient
-                .max_send_value(address, zennies_for_zingo, zip32::AccountId::ZERO)
+                .max_send_value(
+                    address,
+                    zennies_for_zingo,
+                    zip32::AccountId::ZERO,
+                    restriction,
+                )
                 .await
             {
                 Ok(bal) => {
@@ -753,7 +792,7 @@ impl Command for NewUnifiedAddressCommand {
             See `new_taddress` for creating transparent addresses.
 
             Usage:
-            new_address [ o | z ]
+            new_address [ o | z ] [address_index]
 
             Examples:
              - orchard and sapling receivers
@@ -764,6 +803,9 @@ impl Command for NewUnifiedAddressCommand {
 
             - sapling-only
             new_address z
+
+            - jump to index 70 (sapling + orchard)
+            new_address oz 70
         "}
     }
 
@@ -772,12 +814,22 @@ impl Command for NewUnifiedAddressCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        if args.len() != 1 {
+        if args.is_empty() || args.len() > 2 {
             return format!("No address type specified\n{}", self.help());
         }
         if !args[0].contains('o') && !args[0].contains('z') {
             return format!("No address type specified\n{}", self.help());
         }
+        let target_index = if args.len() == 2 {
+            match args[1].parse::<u32>() {
+                Ok(index) => Some(index),
+                Err(_) => {
+                    return "Error: address index must be a non-negative integer".to_string();
+                }
+            }
+        } else {
+            None
+        };
 
         RT.block_on(async move {
             let mut wallet = lightclient.wallet.write().await;
@@ -786,7 +838,7 @@ impl Command for NewUnifiedAddressCommand {
                 orchard: args[0].contains('o'),
                 sapling: args[0].contains('z'),
             };
-            match wallet.generate_unified_address(receivers, zip32::AccountId::ZERO) {
+            match wallet.generate_unified_address(receivers, zip32::AccountId::ZERO, target_index) {
                 Ok((id, unified_address)) => {
                     json::object! {
                         "account" => u32::from(zip32::AccountId::ZERO), // used concrete type instead of u32 to simplify upgrading CLI to multi-account
@@ -811,7 +863,7 @@ impl Command for NewTransparentAddressCommand {
             Create a new transparent address.
 
             Usage:
-            new_taddress
+            new_taddress [address_index]
         "}
     }
 
@@ -819,11 +871,31 @@ impl Command for NewTransparentAddressCommand {
         "Create a new transparent address."
     }
 
-    fn exec(&self, _args: &[&str], lightclient: &mut LightClient) -> String {
+    fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
+        if args.len() > 1 {
+            return format!(
+                "Error: {}\nTry 'help new_taddress' for correct usage.",
+                error::CommandError::InvalidArguments
+            );
+        }
+        let target_index = if let Some(value) = args.get(0) {
+            match value.parse::<u32>() {
+                Ok(idx) => Some(idx),
+                Err(_) => {
+                    return "Error: address index must be a non-negative integer".to_string();
+                }
+            }
+        } else {
+            None
+        };
         RT.block_on(async move {
             let mut wallet = lightclient.wallet.write().await;
             let network = wallet.network;
-            match wallet.generate_transparent_address(zip32::AccountId::ZERO, true) {
+            match wallet.generate_transparent_address(
+                zip32::AccountId::ZERO,
+                true,
+                target_index.and_then(NonHardenedChildIndex::from_index),
+            ) {
                 Ok((id, transparent_address)) => {
                     json::object! {
                         "account" => u32::from(id.account_id()),
@@ -846,7 +918,7 @@ impl Command for NewTransparentAddressAllowGapCommand {
             Create a new transparent address even if the current one has not received funds.
 
             Usage:
-            new_taddress_allow_gap
+            new_taddress_allow_gap [address_index]
 
             Notes:
             This command bypasses the built-in "no-gap" rule that normally prevents creating a new
@@ -869,13 +941,33 @@ impl Command for NewTransparentAddressAllowGapCommand {
         "Create a new transparent address (even if the last one did not receive any funds)."
     }
 
-    fn exec(&self, _args: &[&str], lightclient: &mut LightClient) -> String {
+    fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
+        if args.len() > 1 {
+            return format!(
+                "Error: {}\nTry 'help new_taddress_allow_gap' for correct usage.",
+                error::CommandError::InvalidArguments
+            );
+        }
+        let target_index = if let Some(value) = args.get(0) {
+            match value.parse::<u32>() {
+                Ok(idx) => Some(idx),
+                Err(_) => {
+                    return "Error: address index must be a non-negative integer".to_string();
+                }
+            }
+        } else {
+            None
+        };
         RT.block_on(async move {
             // Generate without enforcing the no-gap constraint
             let mut wallet = lightclient.wallet.write().await;
             let network = wallet.network;
 
-            match wallet.generate_transparent_address(zip32::AccountId::ZERO, false) {
+            match wallet.generate_transparent_address(
+                zip32::AccountId::ZERO,
+                false,
+                target_index.and_then(NonHardenedChildIndex::from_index),
+            ) {
                 Ok((id, transparent_address)) => {
                     json::object! {
                         "account" => u32::from(id.account_id()),
@@ -1088,8 +1180,8 @@ impl Command for SendCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        let receivers = match utils::parse_send_args(args) {
-            Ok(receivers) => receivers,
+        let (receivers, restriction) = match utils::parse_send_args(args) {
+            Ok(result) => result,
             Err(e) => {
                 return format!("Error: {e}\nTry 'help send' for correct usage and examples.");
             }
@@ -1103,7 +1195,7 @@ impl Command for SendCommand {
         };
         RT.block_on(async move {
             match lightclient
-                .propose_send(request, zip32::AccountId::ZERO)
+                .propose_send(request, zip32::AccountId::ZERO, restriction)
                 .await
             {
                 Ok(proposal) => {
@@ -1150,7 +1242,8 @@ impl Command for SendAllCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        let (address, zennies_for_zingo, memo) = match utils::parse_send_all_args(args) {
+        let (address, zennies_for_zingo, memo, restriction) = match utils::parse_send_all_args(args)
+        {
             Ok(parse_results) => parse_results,
             Err(e) => {
                 return format!("Error: {e}\nTry 'help sendall' for correct usage and examples.");
@@ -1158,7 +1251,13 @@ impl Command for SendAllCommand {
         };
         RT.block_on(async move {
             match lightclient
-                .propose_send_all(address, zennies_for_zingo, memo, zip32::AccountId::ZERO)
+                .propose_send_all(
+                    address,
+                    zennies_for_zingo,
+                    memo,
+                    zip32::AccountId::ZERO,
+                    restriction,
+                )
                 .await
             {
                 Ok(proposal) => {
@@ -1207,7 +1306,7 @@ impl Command for QuickSendCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        let receivers = match utils::parse_send_args(args) {
+        let (receivers, restriction) = match utils::parse_send_args(args) {
             Ok(receivers) => receivers,
             Err(e) => {
                 return format!("Error: {e}\nTry 'help quicksend' for correct usage and examples.");
@@ -1221,7 +1320,10 @@ impl Command for QuickSendCommand {
             }
         };
         RT.block_on(async move {
-            match lightclient.quick_send(request, zip32::AccountId::ZERO).await {
+            match lightclient
+                .quick_send(request, zip32::AccountId::ZERO, restriction)
+                .await
+            {
                 Ok(txids) => {
                     object! { "txids" => txids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>() }
                 }
@@ -1256,15 +1358,18 @@ impl Command for ShieldCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        if !args.is_empty() {
-            return format!(
-                "Error: {}\nTry 'help shield' for correct usage and examples.",
-                error::CommandError::InvalidArguments
-            );
-        }
+        let restriction = match utils::parse_transparent_restriction_args(args) {
+            Ok(r) => r,
+            Err(e) => {
+                return format!("Error: {e}\nTry 'help shield' for correct usage and examples.");
+            }
+        };
 
         RT.block_on(async move {
-            match lightclient.propose_shield(zip32::AccountId::ZERO).await {
+            match lightclient
+                .propose_shield(zip32::AccountId::ZERO, restriction)
+                .await
+            {
                 Ok(proposal) => {
                     if proposal.steps().len() != 1 {
                         return object! { "error" => "shielding transactions should not have multiple proposal steps" }.pretty(2);
@@ -1312,17 +1417,18 @@ impl Command for QuickShieldCommand {
     }
 
     fn exec(&self, args: &[&str], lightclient: &mut LightClient) -> String {
-        if !args.is_empty() {
-            return format!(
-                "Error: {}\nTry 'help shield' for correct usage and examples.",
-                error::CommandError::InvalidArguments
-            );
-        }
+        let restriction = match utils::parse_transparent_restriction_args(args) {
+            Ok(r) => r,
+            Err(e) => {
+                return format!("Error: {e}\nTry 'help shield' for correct usage and examples.");
+            }
+        };
 
         RT.block_on(async move {
             match lightclient
-                .quick_shield(zip32::AccountId::ZERO)
-                .await {
+                .quick_shield(zip32::AccountId::ZERO, restriction)
+                .await
+            {
                 Ok(txids) => {
                     object! { "txids" => txids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>() }
                 }

@@ -91,7 +91,7 @@ where
     client.sync_and_await().await.unwrap();
     timestamped_test_log("syncked.");
     let proposal = client
-        .propose_shield(zip32::AccountId::ZERO)
+        .propose_shield(zip32::AccountId::ZERO, None)
         .await
         .map_err(|e| e.to_string())?;
     timestamped_test_log(format!("proposed a shield: {proposal:#?}").as_str());

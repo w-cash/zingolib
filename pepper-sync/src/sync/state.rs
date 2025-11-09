@@ -890,8 +890,7 @@ where
         ))
     } else {
         // TODO: move this whole block into `client::get_frontiers`
-        let sapling_activation_height =
-            consensus_sapling_activation_height(consensus_parameters);
+        let sapling_activation_height = consensus_sapling_activation_height(consensus_parameters);
 
         match block_height.cmp(&(sapling_activation_height - 1)) {
             cmp::Ordering::Greater => {
@@ -950,12 +949,8 @@ pub(super) fn add_shard_ranges(
     subtree_roots: &[SubtreeRoot],
 ) {
     let network_upgrade_activation_height = match shielded_protocol {
-        ShieldedProtocol::Sapling => {
-            consensus_sapling_activation_height(consensus_parameters)
-        }
-        ShieldedProtocol::Orchard => {
-            consensus_orchard_activation_height(consensus_parameters)
-        }
+        ShieldedProtocol::Sapling => consensus_sapling_activation_height(consensus_parameters),
+        ShieldedProtocol::Orchard => consensus_orchard_activation_height(consensus_parameters),
     };
 
     let shard_ranges: &mut Vec<Range<BlockHeight>> = match shielded_protocol {

@@ -15,7 +15,10 @@ use tokio::{sync::RwLock, task::JoinHandle};
 
 use zcash_client_backend::tor;
 use zcash_keys::address::UnifiedAddress;
-use zcash_primitives::{consensus::BlockHeight, legacy::TransparentAddress};
+use zcash_primitives::{
+    consensus::BlockHeight,
+    legacy::{TransparentAddress, keys::NonHardenedChildIndex},
+};
 
 use pepper_sync::{
     error::SyncError, keys::transparent::TransparentAddressId, sync::SyncResult, wallet::SyncMode,
@@ -206,11 +209,12 @@ impl LightClient {
         &mut self,
         receivers: ReceiverSelection,
         account_id: zip32::AccountId,
+        target_index: Option<u32>,
     ) -> Result<(UnifiedAddressId, UnifiedAddress), KeyError> {
         self.wallet
             .write()
             .await
-            .generate_unified_address(receivers, account_id)
+            .generate_unified_address(receivers, account_id, target_index)
     }
 
     /// Wrapper for [`crate::wallet::LightWallet::generate_transparent_address`].
@@ -218,11 +222,21 @@ impl LightClient {
         &mut self,
         account_id: zip32::AccountId,
         enforce_no_gap: bool,
+        target_index: Option<u32>,
     ) -> Result<(TransparentAddressId, TransparentAddress), KeyError> {
-        self.wallet
-            .write()
-            .await
-            .generate_transparent_address(account_id, enforce_no_gap)
+        let target_index = if let Some(value) = target_index {
+            Some(
+                NonHardenedChildIndex::from_index(value)
+                    .ok_or(KeyError::InvalidNonHardenedChildIndex)?,
+            )
+        } else {
+            None
+        };
+        self.wallet.write().await.generate_transparent_address(
+            account_id,
+            enforce_no_gap,
+            target_index,
+        )
     }
 
     /// Wrapper for [`crate::wallet::LightWallet::unified_addresses_json`].
@@ -241,6 +255,19 @@ impl LightClient {
         account_id: zip32::AccountId,
     ) -> Result<AccountBalance, BalanceError> {
         self.wallet.read().await.account_balance(account_id)
+    }
+
+    /// Wrapper for [`crate::wallet::LightWallet::account_balance_for_index_range`].
+    pub async fn account_balance_for_index_range(
+        &self,
+        account_id: zip32::AccountId,
+        start_index: u32,
+        end_index: u32,
+    ) -> Result<AccountBalance, BalanceError> {
+        self.wallet
+            .read()
+            .await
+            .account_balance_for_index_range(account_id, start_index, end_index)
     }
 
     /// Wrapper for [`crate::wallet::LightWallet::transaction_summaries`].

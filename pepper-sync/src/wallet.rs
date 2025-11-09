@@ -709,6 +709,9 @@ pub trait NoteInterface: OutputInterface {
 
     /// Memo
     fn memo(&self) -> &Memo;
+
+    /// Diversifier index associated with this note, if known.
+    fn diversifier_index(&self) -> Option<zip32::DiversifierIndex>;
 }
 
 ///  Transparent coin (output) with metadata relevant to the wallet.
@@ -789,6 +792,8 @@ pub struct WalletNote<N, Nf: Copy> {
     pub(crate) output_id: OutputId,
     /// Identifier for key used to decrypt output.
     pub(crate) key_id: KeyId,
+    /// Diversifier index for the decrypted address, if known.
+    pub(crate) diversifier_index: Option<zip32::DiversifierIndex>,
     /// Decrypted note with recipient and value.
     pub(crate) note: N,
     /// Derived nullifier.
@@ -800,6 +805,15 @@ pub struct WalletNote<N, Nf: Copy> {
     /// Transaction ID of transaction this output was spent.
     /// If `None`, output is not spent.
     pub(crate) spending_transaction: Option<TxId>,
+}
+
+impl<N, Nf: Copy> WalletNote<N, Nf> {
+    pub(crate) fn set_diversifier_index(
+        &mut self,
+        diversifier_index: Option<zip32::DiversifierIndex>,
+    ) {
+        self.diversifier_index = diversifier_index;
+    }
 }
 
 /// Sapling note.
@@ -865,6 +879,10 @@ impl NoteInterface for SaplingNote {
     fn memo(&self) -> &Memo {
         &self.memo
     }
+
+    fn diversifier_index(&self) -> Option<zip32::DiversifierIndex> {
+        self.diversifier_index
+    }
 }
 
 /// Orchard note.
@@ -929,6 +947,10 @@ impl NoteInterface for OrchardNote {
 
     fn memo(&self) -> &Memo {
         &self.memo
+    }
+
+    fn diversifier_index(&self) -> Option<zip32::DiversifierIndex> {
+        self.diversifier_index
     }
 }
 

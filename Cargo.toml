@@ -10,7 +10,7 @@ members = [
     "zingolib",
     "zingo-memo",
     "pepper-sync",
-    "zingo-price", "zingolib_testutils",
+    "zingo-price", "zingolib_testutils", "zingo-auto-shield-cli",
 ]
 resolver = "2"
 

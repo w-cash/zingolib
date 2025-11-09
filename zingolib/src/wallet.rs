@@ -21,6 +21,7 @@ use zingo_price::PriceList;
 use crate::config::ChainType;
 use error::{KeyError, PriceError, WalletError};
 use keys::unified::{UnifiedAddressId, UnifiedKeyStore};
+use restrictions::SpendRestriction;
 use send::SendProgress;
 
 pub mod error;
@@ -34,6 +35,7 @@ pub mod disk;
 pub mod keys;
 pub mod output;
 pub mod propose;
+pub mod restrictions;
 pub mod send;
 pub mod summary;
 pub mod sync;
@@ -141,6 +143,8 @@ pub struct LightWallet {
     pub send_progress: SendProgress,
     /// Boolean for tracking whether the wallet state has changed since last save.
     pub save_required: bool,
+    /// Restrictions applied when selecting spendable notes and coins.
+    spend_restriction: SpendRestriction,
 }
 
 impl LightWallet {
@@ -254,6 +258,7 @@ impl LightWallet {
             price_list: PriceList::new(),
             save_required: true,
             send_progress: SendProgress::new(0),
+            spend_restriction: SpendRestriction::default(),
         })
     }
 

@@ -1,0 +1,27 @@
+[package]
+name = "zingo-auto-shield-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = { workspace = true }
+log = { workspace = true }
+log4rs = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = "0.8"
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+bip0039 = { workspace = true }
+pepper-sync = { path = "../pepper-sync" }
+zingolib = { path = "../zingolib" }
+zcash_primitives = { workspace = true }
+zcash_protocol = { workspace = true }
+zip32 = { workspace = true }
+http = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+rpassword = "7"
+ctrlc = "3"

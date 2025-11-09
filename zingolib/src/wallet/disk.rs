@@ -21,7 +21,9 @@ use zip32::AccountId;
 
 use super::keys::unified::{ReceiverSelection, UnifiedAddressId};
 use super::{LightWallet, error::KeyError};
-use crate::wallet::{SendProgress, WalletSettings, legacy::WalletZecPriceInfo, utils};
+use crate::wallet::{
+    SendProgress, WalletSettings, legacy::WalletZecPriceInfo, restrictions::SpendRestriction, utils,
+};
 use crate::wallet::{legacy::WalletOptions, traits::ReadableWriteable};
 use crate::{
     config::ChainType,
@@ -320,6 +322,7 @@ impl LightWallet {
             birthday,
             unified_key_store,
             send_progress: SendProgress::new(0),
+            spend_restriction: SpendRestriction::default(),
             price_list: PriceList::new(),
             wallet_blocks: BTreeMap::new(),
             wallet_transactions: HashMap::new(),
@@ -559,6 +562,7 @@ impl LightWallet {
             wallet_settings,
             price_list,
             send_progress: SendProgress::new(0),
+            spend_restriction: SpendRestriction::default(),
             save_required: false,
         })
     }

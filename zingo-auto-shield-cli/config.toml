@@ -1,0 +1,32 @@
+birthday = 0
+# Accepted values: "mainnet", "testnet"
+chain = "mainnet"
+
+# Local lightwalletd endpoint the auto-shield wallet uses for sync.
+lightwalletd_server = "http://127.0.0.1:9067"
+
+# Full-node RPC endpoint (Zebra/Zcashd) providing getblockcount/hash/block.
+rpc_url = "http://127.0.0.1:17777"
+
+# First height to inspect and number of confirmations required before shielding.
+start_height = 0
+confirmations = 10
+
+# Directory for wallet state + log files (processed/reward logs resolve relative to it).
+state_dir = "/path/to/configs/wcash"
+processed_log = "processed_blocks.json"
+rewards_log = "reward_blocks.json"
+queue_log = "shield_queue.json"
+log_file = "auto-shield.log"
+# How often to rerun scans once caught up (seconds)
+poll_interval_seconds = 60
+
+# Random shielding delay (minutes) applied after a reward is detected.
+delay_min_minutes = 1440
+delay_max_minutes = 14400
+# Grace period (minutes) before overdue queue entries are re-randomized.
+reschedule_grace_minutes = 0
+
+# Optional: override activation heights for dev/regtest networks (omit on mainnet/testnet).
+sapling_activation_height = 1
+orchard_activation_height = 1

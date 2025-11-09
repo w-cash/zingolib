@@ -86,7 +86,7 @@ pub mod from_inputs {
         let request = transaction_request_from_send_inputs(raw_receivers)
             .expect("should be able to create a transaction request as receivers are valid.");
         quick_sender
-            .quick_send(request, zip32::AccountId::ZERO)
+            .quick_send(request, zip32::AccountId::ZERO, None)
             .await
     }
 
@@ -129,7 +129,9 @@ pub mod from_inputs {
     ) -> Result<crate::data::proposal::ProportionalFeeProposal, ProposeSendError> {
         let request = transaction_request_from_send_inputs(raw_receivers)
             .expect("should be able to create a transaction request as receivers are valid.");
-        proposer.propose_send(request, zip32::AccountId::ZERO).await
+        proposer
+            .propose_send(request, zip32::AccountId::ZERO, None)
+            .await
     }
 }
 

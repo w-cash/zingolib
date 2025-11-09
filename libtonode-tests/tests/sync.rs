@@ -159,7 +159,7 @@ async fn sync_test() {
     );
     println!(
         "{:?}",
-        recipient.propose_shield(zip32::AccountId::ZERO).await
+        recipient.propose_shield(zip32::AccountId::ZERO, None).await
     );
 
     // println!(

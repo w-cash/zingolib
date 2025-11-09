@@ -471,17 +471,29 @@ mod fast {
 
         // create a range of UAs to be discovered when recipient is reset
         let orchard_only_addr = recipient
-            .generate_unified_address(ReceiverSelection::orchard_only(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::orchard_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .map(|(_, ua)| ua.encode(&network))
             .unwrap();
         let sapling_only_addr = recipient
-            .generate_unified_address(ReceiverSelection::sapling_only(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::sapling_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .map(|(_, ua)| ua.encode(&network))
             .unwrap();
         let (_, all_shielded_addr) = recipient
-            .generate_unified_address(ReceiverSelection::all_shielded(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::all_shielded(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
         let all_shielded_encoded = all_shielded_addr.encode(&network);
@@ -647,6 +659,7 @@ mod fast {
                 false,
                 None,
                 zip32::AccountId::ZERO,
+                None,
             )
             .await
             .unwrap();
@@ -665,6 +678,7 @@ mod fast {
                 true,
                 None,
                 zip32::AccountId::ZERO,
+                None,
             )
             .await
             .unwrap();
@@ -767,7 +781,7 @@ mod fast {
             ($client:ident, $message:ident) => {
                 // Propose sending the message
                 $client
-                    .propose_send($message.clone(), zip32::AccountId::ZERO)
+                    .propose_send($message.clone(), zip32::AccountId::ZERO, None)
                     .await
                     .unwrap();
                 // Complete and broadcast the stored proposal
@@ -781,11 +795,19 @@ mod fast {
         // Addresses: alice, bob, charlie
         let alice = get_base_address(&recipient, PoolType::ORCHARD).await;
         let (_, bob) = faucet
-            .generate_unified_address(ReceiverSelection::all_shielded(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::all_shielded(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
         let (_, charlie) = faucet
-            .generate_unified_address(ReceiverSelection::all_shielded(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::all_shielded(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1013,7 +1035,7 @@ mod fast {
             let transaction_request = TransactionRequest::new(payment).unwrap();
 
             let proposal = sender
-                .propose_send(transaction_request, zip32::AccountId::ZERO)
+                .propose_send(transaction_request, zip32::AccountId::ZERO, None)
                 .await
                 .unwrap();
             assert_eq!(proposal.steps().len(), 2usize);
@@ -1120,7 +1142,7 @@ mod fast {
         drop(wallet);
 
         recipient
-            .quick_shield(zip32::AccountId::ZERO)
+            .quick_shield(zip32::AccountId::ZERO, None)
             .await
             .unwrap();
         increase_height_and_wait_for_client(&local_net, &mut recipient, 1)
@@ -1145,11 +1167,19 @@ mod fast {
     async fn diversified_addresses_receive_funds_in_best_pool() {
         let (local_net, mut faucet, mut recipient) = scenarios::faucet_recipient_default().await;
         recipient
-            .generate_unified_address(ReceiverSelection::orchard_only(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::orchard_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
         recipient
-            .generate_unified_address(ReceiverSelection::all_shielded(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::all_shielded(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
         let addresses = recipient.unified_addresses_json().await;
@@ -1197,7 +1227,11 @@ mod fast {
         );
         let network = recipient.wallet.read().await.network;
         let (new_address_id, new_address) = recipient
-            .generate_unified_address(ReceiverSelection::all_shielded(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::all_shielded(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1218,7 +1252,11 @@ f06qvre5qdlkqp5fksyy9j5dm0fdwxwptkk04gzt84r5qv0wfdlx250n0gdcdd6e00"
         );
 
         let (sapling_address_id, sapling_address) = recipient
-            .generate_unified_address(ReceiverSelection::sapling_only(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::sapling_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1238,7 +1276,7 @@ uregtest1n22mmna853578fakgx6z6adn24ey5r7wfye8ulhscqc9hvm0rf5czxjuz9te0zzc8j93y35
         );
 
         let (taddress_id, new_taddress) = recipient
-            .generate_transparent_address(zip32::AccountId::ZERO, false)
+            .generate_transparent_address(zip32::AccountId::ZERO, false, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1368,7 +1406,10 @@ tmQuMoTTjU3GFfTjrhPiBYihbTVfYmPk5Gr"
         increase_height_and_wait_for_client(&local_net, &mut faucet, 100)
             .await
             .unwrap();
-        faucet.quick_shield(zip32::AccountId::ZERO).await.unwrap();
+        faucet
+            .quick_shield(zip32::AccountId::ZERO, None)
+            .await
+            .unwrap();
         increase_height_and_wait_for_client(&local_net, &mut faucet, 1)
             .await
             .unwrap();
@@ -1393,7 +1434,10 @@ tmQuMoTTjU3GFfTjrhPiBYihbTVfYmPk5Gr"
         increase_height_and_wait_for_client(&local_net, &mut faucet, 100)
             .await
             .unwrap();
-        let proposal = faucet.propose_shield(zip32::AccountId::ZERO).await.unwrap();
+        let proposal = faucet
+            .propose_shield(zip32::AccountId::ZERO, None)
+            .await
+            .unwrap();
         let only_step = proposal.steps().first();
 
         // Orchard action and dummy, plus 4 transparent inputs
@@ -1967,7 +2011,7 @@ mod slow {
             .await
             .unwrap();
         recipient
-            .quick_shield(zip32::AccountId::ZERO)
+            .quick_shield(zip32::AccountId::ZERO, None)
             .await
             .unwrap();
         increase_height_and_wait_for_client(local_net, &mut recipient, 1)
@@ -3455,7 +3499,10 @@ TransactionSummary {
         //  # Expected Fees to recipient:
         //    - legacy: 10_000
         //    - 317:    15_000 1-orchard + 1-dummy + 1-transparent in
-        client.quick_shield(zip32::AccountId::ZERO).await.unwrap();
+        client
+            .quick_shield(zip32::AccountId::ZERO, None)
+            .await
+            .unwrap();
         bump_and_check!(o: 35_000 s: 0 t: 0);
         test_dev_total_expected_fee += 15_000;
         assert_eq!(
@@ -3539,7 +3586,10 @@ TransactionSummary {
         //  # Expected Fees:
         //    - legacy: 10_000
         //    - 317:    20_000 = 10_000 orchard and o-dummy + 10_000 (2 t-notes)
-        client.quick_shield(zip32::AccountId::ZERO).await.unwrap();
+        client
+            .quick_shield(zip32::AccountId::ZERO, None)
+            .await
+            .unwrap();
         bump_and_check!(o: 500_000 s: 10_000 t: 0);
         test_dev_total_expected_fee += 20_000;
         assert_eq!(
@@ -3642,7 +3692,10 @@ TransactionSummary {
         //  # Expected Fees:
         //    - legacy: 10_000
         //    - 317:    15_000 1t and 2o
-        client.quick_shield(zip32::AccountId::ZERO).await.unwrap();
+        client
+            .quick_shield(zip32::AccountId::ZERO, None)
+            .await
+            .unwrap();
         bump_and_check!(o: 455_000 s: 0 t: 0);
         test_dev_total_expected_fee += 15_000;
         assert_eq!(
@@ -4369,7 +4422,7 @@ mod send_all {
             Zatoshis::from_u64(initial_funds - zennies_magnitude - expected_fee).unwrap();
         assert_eq!(
             recipient
-                .max_send_value(external_uaddress, true, zip32::AccountId::ZERO)
+                .max_send_value(external_uaddress, true, zip32::AccountId::ZERO, None)
                 .await
                 .unwrap(),
             expected_balance
@@ -4429,6 +4482,7 @@ mod send_all {
                 false,
                 None,
                 zip32::AccountId::ZERO,
+                None,
             )
             .await
             .unwrap();
@@ -4471,6 +4525,7 @@ mod send_all {
                 false,
                 None,
                 zip32::AccountId::ZERO,
+                None,
             )
             .await;
 
@@ -4499,6 +4554,7 @@ mod send_all {
                 false,
                 None,
                 zip32::AccountId::ZERO,
+                None,
             )
             .await;
 

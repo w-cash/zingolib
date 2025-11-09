@@ -66,7 +66,7 @@ async fn shield_transparent() {
     );
 
     let shielding_proposal = recipient
-        .propose_shield(zip32::AccountId::ZERO)
+        .propose_shield(zip32::AccountId::ZERO, None)
         .await
         .unwrap();
 

@@ -1,8 +1,11 @@
 //! Balance methods and types for `crate::wallet::LightWallet`.
 
-use pepper_sync::wallet::{
-    KeyIdInterface, NoteInterface, OrchardNote, OutputInterface, SaplingNote, TransparentCoin,
-    WalletTransaction,
+use pepper_sync::{
+    keys::transparent::TransparentScope,
+    wallet::{
+        KeyIdInterface, NoteInterface, OrchardNote, OutputInterface, SaplingNote, TransparentCoin,
+        WalletTransaction,
+    },
 };
 use zcash_client_backend::data_api::WalletRead;
 use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
@@ -14,6 +17,7 @@ use super::{
     LightWallet,
     error::{BalanceError, KeyError},
     keys::unified::UnifiedKeyStore,
+    output::ShieldedNoteAdapter,
 };
 
 /// Balance for a wallet account.
@@ -177,6 +181,113 @@ impl LightWallet {
                 Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
                 Err(e) => return Err(e),
             };
+        let total_transparent_balance = confirmed_transparent_balance
+            .and_then(|confirmed| unconfirmed_transparent_balance + confirmed);
+
+        Ok(AccountBalance {
+            confirmed_orchard_balance,
+            unconfirmed_orchard_balance,
+            total_orchard_balance,
+            confirmed_sapling_balance,
+            unconfirmed_sapling_balance,
+            total_sapling_balance,
+            confirmed_transparent_balance,
+            unconfirmed_transparent_balance,
+            total_transparent_balance,
+        })
+    }
+
+    /// Returns account balance limited to notes/coins associated with unified address indexes in the provided range.
+    pub fn account_balance_for_index_range(
+        &self,
+        account_id: zip32::AccountId,
+        start_index: u32,
+        end_index: u32,
+    ) -> Result<AccountBalance, BalanceError> {
+        let (start_index, end_index) = if start_index <= end_index {
+            (start_index, end_index)
+        } else {
+            (end_index, start_index)
+        };
+
+        let confirmed_orchard_balance = match self.get_filtered_balance::<OrchardNote, _>(
+            |note, transaction: &WalletTransaction| {
+                self.shielded_note_in_index_range(note, start_index, end_index)
+                    && note.value() > MARGINAL_FEE.into_u64()
+                    && transaction.status().is_confirmed()
+            },
+            account_id,
+        ) {
+            Ok(zats) => Some(zats),
+            Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
+            Err(e) => return Err(e),
+        };
+        let unconfirmed_orchard_balance = match self.get_filtered_balance::<OrchardNote, _>(
+            |note, transaction: &WalletTransaction| {
+                self.shielded_note_in_index_range(note, start_index, end_index)
+                    && note.value() > MARGINAL_FEE.into_u64()
+                    && !transaction.status().is_confirmed()
+            },
+            account_id,
+        ) {
+            Ok(zats) => Some(zats),
+            Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
+            Err(e) => return Err(e),
+        };
+        let total_orchard_balance =
+            confirmed_orchard_balance.and_then(|confirmed| unconfirmed_orchard_balance + confirmed);
+
+        let confirmed_sapling_balance = match self.get_filtered_balance::<SaplingNote, _>(
+            |note, transaction: &WalletTransaction| {
+                self.shielded_note_in_index_range(note, start_index, end_index)
+                    && note.value() > MARGINAL_FEE.into_u64()
+                    && transaction.status().is_confirmed()
+            },
+            account_id,
+        ) {
+            Ok(zats) => Some(zats),
+            Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
+            Err(e) => return Err(e),
+        };
+        let unconfirmed_sapling_balance = match self.get_filtered_balance::<SaplingNote, _>(
+            |note, transaction: &WalletTransaction| {
+                self.shielded_note_in_index_range(note, start_index, end_index)
+                    && note.value() > MARGINAL_FEE.into_u64()
+                    && !transaction.status().is_confirmed()
+            },
+            account_id,
+        ) {
+            Ok(zats) => Some(zats),
+            Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
+            Err(e) => return Err(e),
+        };
+        let total_sapling_balance =
+            confirmed_sapling_balance.and_then(|confirmed| unconfirmed_sapling_balance + confirmed);
+
+        let confirmed_transparent_balance = match self.get_filtered_balance::<TransparentCoin, _>(
+            |coin, transaction: &WalletTransaction| {
+                self.transparent_coin_in_index_range(coin, start_index, end_index)
+                    && coin.value() > MARGINAL_FEE.into_u64()
+                    && transaction.status().is_confirmed()
+            },
+            account_id,
+        ) {
+            Ok(zats) => Some(zats),
+            Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
+            Err(e) => return Err(e),
+        };
+        let unconfirmed_transparent_balance = match self.get_filtered_balance::<TransparentCoin, _>(
+            |coin, transaction: &WalletTransaction| {
+                self.transparent_coin_in_index_range(coin, start_index, end_index)
+                    && coin.value() > MARGINAL_FEE.into_u64()
+                    && !transaction.status().is_confirmed()
+            },
+            account_id,
+        ) {
+            Ok(zats) => Some(zats),
+            Err(BalanceError::KeyError(KeyError::NoViewCapability)) => None,
+            Err(e) => return Err(e),
+        };
         let total_transparent_balance = confirmed_transparent_balance
             .and_then(|confirmed| unconfirmed_transparent_balance + confirmed);
 
@@ -491,6 +602,27 @@ impl LightWallet {
         }?;
 
         (orchard_balance + sapling_balance).ok_or(BalanceError::Overflow)
+    }
+
+    fn shielded_note_in_index_range<N>(&self, note: &N, start_index: u32, end_index: u32) -> bool
+    where
+        N: ShieldedNoteAdapter,
+    {
+        self.note_unified_index(note)
+            .is_some_and(|index| index >= start_index && index <= end_index)
+    }
+
+    fn transparent_coin_in_index_range(
+        &self,
+        coin: &TransparentCoin,
+        start_index: u32,
+        end_index: u32,
+    ) -> bool {
+        if coin.key_id().scope() != TransparentScope::External {
+            return false;
+        }
+        let index = coin.key_id().address_index().index();
+        index >= start_index && index <= end_index
     }
 }
 

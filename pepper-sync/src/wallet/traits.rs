@@ -316,9 +316,7 @@ pub trait SyncShardTrees: SyncWallet {
         &mut self,
         truncate_height: BlockHeight,
     ) -> Result<(), SyncError<Self::Error>> {
-        let shard_trees = self
-            .get_shard_trees_mut()
-            .map_err(SyncError::WalletError)?;
+        let shard_trees = self.get_shard_trees_mut().map_err(SyncError::WalletError)?;
 
         if !shard_trees
             .sapling

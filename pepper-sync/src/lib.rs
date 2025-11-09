@@ -104,8 +104,8 @@ After the sync process is initialized, it will be in a state of verification, on
 "#]
 #![doc = simple_mermaid::mermaid!("../diagrams/process_scan_results.mmd")]
 
-pub(crate) mod client;
 pub mod activation;
+pub(crate) mod client;
 pub mod config;
 pub mod error;
 pub mod keys;
@@ -114,12 +114,12 @@ pub mod sync;
 pub mod wallet;
 pub(crate) mod witness;
 
+pub use activation::{set_orchard_activation_height, set_sapling_activation_height};
 pub use sync::add_scan_targets;
 pub use sync::reset_spends;
 pub use sync::scan_pending_transaction;
 pub use sync::sync;
 pub use sync::sync_status;
-pub use activation::{set_orchard_activation_height, set_sapling_activation_height};
 
 use zcash_protocol::ShieldedProtocol;
 

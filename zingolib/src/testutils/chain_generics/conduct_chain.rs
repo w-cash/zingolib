@@ -32,7 +32,11 @@ pub trait ConductChain {
         let config = self.zingo_config();
         let mut lightclient = LightClient::new(config, 0.into(), false).unwrap();
         lightclient
-            .generate_unified_address(ReceiverSelection::sapling_only(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::sapling_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .await
             .unwrap();
 

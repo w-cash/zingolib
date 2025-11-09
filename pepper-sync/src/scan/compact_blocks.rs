@@ -420,37 +420,37 @@ pub(crate) async fn calculate_block_tree_bounds(
     fetch_request_sender: mpsc::UnboundedSender<FetchRequest>,
     compact_block: &CompactBlock,
 ) -> Result<TreeBounds, ServerError> {
-    let (sapling_final_tree_size, orchard_final_tree_size) =
-        if let Some(chain_metadata) = compact_block.chain_metadata {
-            (
-                chain_metadata.sapling_commitment_tree_size,
-                chain_metadata.orchard_commitment_tree_size,
-            )
-        } else {
-            let sapling_activation_height =
-                consensus_sapling_activation_height(consensus_parameters);
-            match compact_block.height().cmp(&sapling_activation_height) {
-                cmp::Ordering::Greater => {
-                    let frontiers =
-                        client::get_frontiers(fetch_request_sender.clone(), compact_block.height())
-                            .await?;
-                    (
-                        frontiers
-                            .final_sapling_tree()
-                            .tree_size()
-                            .try_into()
-                            .expect("should not be more than 2^32 note commitments in the tree!"),
-                        frontiers
-                            .final_orchard_tree()
-                            .tree_size()
-                            .try_into()
-                            .expect("should not be more than 2^32 note commitments in the tree!"),
-                    )
-                }
-                cmp::Ordering::Equal => (0, 0),
-                cmp::Ordering::Less => panic!("pre-sapling not supported!"),
+    let (sapling_final_tree_size, orchard_final_tree_size) = if let Some(chain_metadata) =
+        compact_block.chain_metadata
+    {
+        (
+            chain_metadata.sapling_commitment_tree_size,
+            chain_metadata.orchard_commitment_tree_size,
+        )
+    } else {
+        let sapling_activation_height = consensus_sapling_activation_height(consensus_parameters);
+        match compact_block.height().cmp(&sapling_activation_height) {
+            cmp::Ordering::Greater => {
+                let frontiers =
+                    client::get_frontiers(fetch_request_sender.clone(), compact_block.height())
+                        .await?;
+                (
+                    frontiers
+                        .final_sapling_tree()
+                        .tree_size()
+                        .try_into()
+                        .expect("should not be more than 2^32 note commitments in the tree!"),
+                    frontiers
+                        .final_orchard_tree()
+                        .tree_size()
+                        .try_into()
+                        .expect("should not be more than 2^32 note commitments in the tree!"),
+                )
             }
-        };
+            cmp::Ordering::Equal => (0, 0),
+            cmp::Ordering::Less => panic!("pre-sapling not supported!"),
+        }
+    };
 
     let sapling_output_count: u32 = compact_block
         .vtx

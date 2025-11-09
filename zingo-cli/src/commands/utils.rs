@@ -2,6 +2,7 @@
 
 use json::JsonValue;
 
+use pepper_sync::keys::transparent::TransparentScope;
 use zcash_address::ZcashAddress;
 use zcash_primitives::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
@@ -10,39 +11,39 @@ use crate::commands::error::CommandError;
 use zingolib::data::receivers::Receivers;
 use zingolib::utils::conversion::{address_from_str, zatoshis_from_u64};
 use zingolib::wallet;
+use zingolib::wallet::restrictions::{ShieldedAddressRestriction, TransparentAddressRestriction};
 
 // Parse the send arguments for `do_send`.
 // The send arguments have two possible formats:
 // - 1 argument in the form of a JSON string for multiple sends. '[{"address":"<address>", "value":<value>, "memo":"<optional memo>"}, ...]'
 // - 2 (+1 optional) arguments for a single address send. &["<address>", <amount>, "<optional memo>"]
-pub(super) fn parse_send_args(args: &[&str]) -> Result<Receivers, CommandError> {
-    // Check for a single argument that can be parsed as JSON
-    let send_args = if args.len() == 1 {
+pub(super) fn parse_send_args(
+    args: &[&str],
+) -> Result<(Receivers, Option<ShieldedAddressRestriction>), CommandError> {
+    if args.len() == 1 {
         let json_args = json::parse(args[0]).map_err(CommandError::ArgsNotJson)?;
 
-        if !json_args.is_array() {
+        if json_args.is_array() {
+            return Ok((parse_receivers_array(&json_args)?, None));
+        } else if json_args.is_object() {
+            if !json_args.has_key("receivers") {
+                return Err(CommandError::MissingKey("receivers".to_string()));
+            }
+            let receivers_json = &json_args["receivers"];
+            if !receivers_json.is_array() {
+                return Err(CommandError::UnexpectedType(
+                    "\"receivers\" must be an array".to_string(),
+                ));
+            }
+            let receivers = parse_receivers_array(receivers_json)?;
+            let restriction = parse_shielded_from(&json_args["from"])?;
+            return Ok((receivers, restriction));
+        } else {
             return Err(CommandError::SingleArgNotJsonArray(json_args.to_string()));
         }
-        if json_args.is_empty() {
-            return Err(CommandError::EmptyJsonArray);
-        }
+    }
 
-        json_args
-            .members()
-            .map(|j| {
-                let recipient_address = address_from_json(j)?;
-                let amount = zatoshis_from_json(j)?;
-                let memo = memo_from_json(j)?;
-                check_memo_compatibility(&recipient_address, &memo)?;
-
-                Ok(zingolib::data::receivers::Receiver {
-                    recipient_address,
-                    amount,
-                    memo,
-                })
-            })
-            .collect::<Result<Receivers, CommandError>>()
-    } else if args.len() == 2 || args.len() == 3 {
+    if args.len() == 2 || args.len() == 3 {
         let recipient_address =
             address_from_str(args[0]).map_err(CommandError::ConversionFailed)?;
         let amount_u64 = args[1]
@@ -60,28 +61,60 @@ pub(super) fn parse_send_args(args: &[&str]) -> Result<Receivers, CommandError> 
         };
         check_memo_compatibility(&recipient_address, &memo)?;
 
-        Ok(vec![zingolib::data::receivers::Receiver {
-            recipient_address,
-            amount,
-            memo,
-        }])
-    } else {
-        return Err(CommandError::InvalidArguments);
-    }?;
+        return Ok((
+            vec![zingolib::data::receivers::Receiver {
+                recipient_address,
+                amount,
+                memo,
+            }],
+            None,
+        ));
+    }
 
-    Ok(send_args)
+    Err(CommandError::InvalidArguments)
 }
 
 // The send arguments have two possible formats:
 // - 1 arguments in the form of:
 //    *  a JSON string (single address only). '[{"address":"<address>", "memo":"<optional memo>", "zennies_for_zingo":<true|false>}]'
 // - 1 + 1 optional arguments for a single address send. &["<address>", "<optional memo>"]
+fn parse_receivers_array(json_array: &JsonValue) -> Result<Receivers, CommandError> {
+    if json_array.is_empty() {
+        return Err(CommandError::EmptyJsonArray);
+    }
+
+    json_array
+        .members()
+        .map(|j| {
+            let recipient_address = address_from_json(j)?;
+            let amount = zatoshis_from_json(j)?;
+            let memo = memo_from_json(j)?;
+            check_memo_compatibility(&recipient_address, &memo)?;
+
+            Ok(zingolib::data::receivers::Receiver {
+                recipient_address,
+                amount,
+                memo,
+            })
+        })
+        .collect::<Result<Receivers, CommandError>>()
+}
+
 pub(super) fn parse_send_all_args(
     args: &[&str],
-) -> Result<(ZcashAddress, bool, Option<MemoBytes>), CommandError> {
+) -> Result<
+    (
+        ZcashAddress,
+        bool,
+        Option<MemoBytes>,
+        Option<ShieldedAddressRestriction>,
+    ),
+    CommandError,
+> {
     let address: ZcashAddress;
     let memo: Option<MemoBytes>;
     let zennies_for_zingo: bool;
+    let mut restriction = None;
     if args.len() == 1 {
         if let Ok(addr) = address_from_str(args[0]) {
             address = addr;
@@ -101,6 +134,7 @@ pub(super) fn parse_send_all_args(
             memo = memo_from_json(&json_arg)?;
             check_memo_compatibility(&address, &memo)?;
             zennies_for_zingo = zennies_flag_from_json(&json_arg)?;
+            restriction = parse_shielded_from(&json_arg["from"])?;
         }
     } else if args.len() == 2 {
         zennies_for_zingo = false;
@@ -113,7 +147,7 @@ pub(super) fn parse_send_all_args(
     } else {
         return Err(CommandError::InvalidArguments);
     }
-    Ok((address, zennies_for_zingo, memo))
+    Ok((address, zennies_for_zingo, memo, restriction))
 }
 
 // Parse the arguments for `spendable_balance`.
@@ -124,16 +158,18 @@ pub(super) fn parse_send_all_args(
 // string.
 pub(super) fn parse_max_send_value_args(
     args: &[&str],
-) -> Result<(ZcashAddress, bool), CommandError> {
+) -> Result<(ZcashAddress, bool, Option<ShieldedAddressRestriction>), CommandError> {
     if args.len() != 1 {
         return Err(CommandError::InvalidArguments);
     }
     let address: ZcashAddress;
     let zennies_for_zingo: bool;
+    let restriction;
 
     if let Ok(addr) = address_from_str(args[0]) {
         address = addr;
         zennies_for_zingo = false;
+        restriction = None;
     } else {
         let json_arg = json::parse(args[0]).map_err(|_e| CommandError::ArgNotJsonOrValidAddress)?;
 
@@ -147,9 +183,10 @@ pub(super) fn parse_max_send_value_args(
         }
         address = address_from_json(&json_arg)?;
         zennies_for_zingo = zennies_flag_from_json(&json_arg)?;
+        restriction = parse_shielded_from(&json_arg["from"])?;
     }
 
-    Ok((address, zennies_for_zingo))
+    Ok((address, zennies_for_zingo, restriction))
 }
 
 // Checks send inputs do not contain memo's to transparent addresses.
@@ -217,6 +254,154 @@ fn memo_from_json(json_array: &JsonValue) -> Result<Option<MemoBytes>, CommandEr
     } else {
         Ok(None)
     }
+}
+
+fn parse_shielded_from(
+    value: &JsonValue,
+) -> Result<Option<ShieldedAddressRestriction>, CommandError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    if !value.is_object() {
+        return Err(CommandError::UnexpectedType(
+            "\"from\" must be a JSON object".to_string(),
+        ));
+    }
+    let scope = parse_shielded_scope(value["scope"].as_str())?;
+    if scope != zip32::Scope::External {
+        return Err(CommandError::UnexpectedType(
+            "shielded restrictions currently support external scope only".to_string(),
+        ));
+    }
+    let account_id = parse_account_id(value["account"].as_u64())?;
+    let start_index = parse_required_u32(value, "address_index")?;
+    let max_index = parse_optional_u32(value, "max_address_index")?;
+    if let Some(max_index) = max_index {
+        if max_index < start_index {
+            return Err(CommandError::UnexpectedType(
+                "\"max_address_index\" must be >= \"address_index\"".to_string(),
+            ));
+        }
+    }
+
+    Ok(Some(ShieldedAddressRestriction::new(
+        account_id,
+        start_index,
+        max_index,
+    )))
+}
+
+fn parse_transparent_from(
+    value: &JsonValue,
+) -> Result<Option<TransparentAddressRestriction>, CommandError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    if !value.is_object() {
+        return Err(CommandError::UnexpectedType(
+            "transparent selector must be a JSON object".to_string(),
+        ));
+    }
+    let scope = parse_transparent_scope(value["scope"].as_str())?;
+    let account_id = parse_account_id(value["account"].as_u64())?;
+    let start_index = parse_required_u32(value, "address_index")?;
+    let max_index = parse_optional_u32(value, "max_address_index")?;
+    if let Some(max_index) = max_index {
+        if max_index < start_index {
+            return Err(CommandError::UnexpectedType(
+                "\"max_address_index\" must be >= \"address_index\"".to_string(),
+            ));
+        }
+    }
+
+    Ok(Some(TransparentAddressRestriction::new(
+        account_id,
+        scope,
+        start_index,
+        max_index,
+    )))
+}
+
+fn parse_required_u32(target: &JsonValue, key: &str) -> Result<u32, CommandError> {
+    if !target.has_key(key) {
+        return Err(CommandError::MissingKey(key.to_string()));
+    }
+    target[key].as_u64().map(|v| v as u32).ok_or_else(|| {
+        CommandError::UnexpectedType(format!("\"{key}\" must be a non-negative integer"))
+    })
+}
+
+fn parse_optional_u32(target: &JsonValue, key: &str) -> Result<Option<u32>, CommandError> {
+    if !target.has_key(key) || target[key].is_null() {
+        return Ok(None);
+    }
+    target[key]
+        .as_u64()
+        .map(|v| v as u32)
+        .ok_or_else(|| {
+            CommandError::UnexpectedType(format!("\"{key}\" must be a non-negative integer"))
+        })
+        .map(Some)
+}
+
+fn extract_restriction_object<'a>(json_arg: &'a JsonValue) -> Result<&'a JsonValue, CommandError> {
+    if !json_arg.is_object() {
+        return Err(CommandError::UnexpectedType(
+            "expected a JSON object describing the selector".to_string(),
+        ));
+    }
+    if json_arg.has_key("from") {
+        let from = &json_arg["from"];
+        if !from.is_object() || from.is_null() {
+            return Err(CommandError::UnexpectedType(
+                "\"from\" must be a JSON object".to_string(),
+            ));
+        }
+        Ok(from)
+    } else {
+        Ok(json_arg)
+    }
+}
+
+fn parse_account_id(raw: Option<u64>) -> Result<zip32::AccountId, CommandError> {
+    let value = raw.unwrap_or(0);
+    zip32::AccountId::try_from(value as u32)
+        .map_err(|_| CommandError::UnexpectedType("account id is out of range".to_string()))
+}
+
+fn parse_shielded_scope(value: Option<&str>) -> Result<zip32::Scope, CommandError> {
+    match value.unwrap_or("external").to_lowercase().as_str() {
+        "external" => Ok(zip32::Scope::External),
+        "internal" => Ok(zip32::Scope::Internal),
+        other => Err(CommandError::UnexpectedType(format!(
+            "invalid scope \"{other}\""
+        ))),
+    }
+}
+
+fn parse_transparent_scope(value: Option<&str>) -> Result<TransparentScope, CommandError> {
+    match value.unwrap_or("external").to_lowercase().as_str() {
+        "external" => Ok(TransparentScope::External),
+        "internal" => Ok(TransparentScope::Internal),
+        "refund" => Ok(TransparentScope::Refund),
+        other => Err(CommandError::UnexpectedType(format!(
+            "invalid scope \"{other}\""
+        ))),
+    }
+}
+
+pub(super) fn parse_transparent_restriction_args(
+    args: &[&str],
+) -> Result<Option<TransparentAddressRestriction>, CommandError> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+    if args.len() == 1 {
+        let json_arg = json::parse(args[0]).map_err(CommandError::ArgsNotJson)?;
+        let restriction_json = extract_restriction_object(&json_arg)?;
+        return parse_transparent_from(restriction_json);
+    }
+    Err(CommandError::InvalidArguments)
 }
 
 #[cfg(test)]

@@ -28,6 +28,7 @@ pub mod send_with_proposal {
     use crate::lightclient::error::{QuickSendError, QuickShieldError, SendError};
     use crate::wallet::error::TransmissionError;
     use crate::wallet::output::OutputRef;
+    use crate::wallet::restrictions::{ShieldedAddressRestriction, TransparentAddressRestriction};
 
     impl LightClient {
         async fn send(
@@ -98,12 +99,13 @@ pub mod send_with_proposal {
             &mut self,
             request: TransactionRequest,
             account_id: zip32::AccountId,
+            restriction: Option<ShieldedAddressRestriction>,
         ) -> Result<NonEmpty<TxId>, QuickSendError> {
             let proposal = self
                 .wallet
                 .write()
                 .await
-                .create_send_proposal(request, account_id)
+                .create_send_proposal(request, account_id, restriction)
                 .await?;
 
             Ok(self.send(&proposal, account_id).await?)
@@ -113,12 +115,13 @@ pub mod send_with_proposal {
         pub async fn quick_shield(
             &mut self,
             account_id: zip32::AccountId,
+            restriction: Option<TransparentAddressRestriction>,
         ) -> Result<NonEmpty<TxId>, QuickShieldError> {
             let proposal = self
                 .wallet
                 .write()
                 .await
-                .create_shield_proposal(account_id)
+                .create_shield_proposal(account_id, restriction)
                 .await?;
 
             Ok(self.shield(&proposal, account_id).await?)

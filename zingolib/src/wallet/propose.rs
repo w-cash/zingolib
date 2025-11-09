@@ -16,7 +16,13 @@ use super::{
     LightWallet,
     error::{ProposeSendError, ProposeShieldError, WalletError},
 };
-use crate::{config::ChainType, wallet::keys::unified::ReceiverSelection};
+use crate::{
+    config::ChainType,
+    wallet::{
+        keys::unified::ReceiverSelection,
+        restrictions::{ShieldedAddressRestriction, TransparentAddressRestriction},
+    },
+};
 use pepper_sync::{keys::transparent::TransparentScope, sync::ScanPriority};
 
 impl LightWallet {
@@ -25,6 +31,7 @@ impl LightWallet {
         &mut self,
         request: TransactionRequest,
         account_id: zip32::AccountId,
+        restriction: Option<ShieldedAddressRestriction>,
     ) -> Result<crate::data::proposal::ProportionalFeeProposal, ProposeSendError> {
         let refund_address_count = self
             .transparent_addresses
@@ -41,7 +48,9 @@ impl LightWallet {
         );
         let network = self.network;
 
-        zcash_client_backend::data_api::wallet::propose_transfer::<
+        let previous_restriction =
+            std::mem::replace(&mut self.spend_restriction.shielded, restriction);
+        let result = zcash_client_backend::data_api::wallet::propose_transfer::<
             LightWallet,
             ChainType,
             GreedyInputSelector<LightWallet>,
@@ -60,7 +69,9 @@ impl LightWallet {
             // TODO: replace wallet min_confirmations field with confirmation policy to unify for all proposals
             ConfirmationsPolicy::new_symmetrical(self.wallet_settings.min_confirmations, false),
         )
-        .map_err(ProposeSendError::Proposal)
+        .map_err(ProposeSendError::Proposal);
+        self.spend_restriction.shielded = previous_restriction;
+        result
     }
 
     /// The shield operation consumes a proposal that transfers value
@@ -74,14 +85,19 @@ impl LightWallet {
     pub(crate) async fn create_shield_proposal(
         &mut self,
         account_id: zip32::AccountId,
+        restriction: Option<TransparentAddressRestriction>,
     ) -> Result<crate::data::proposal::ProportionalFeeShieldProposal, ProposeShieldError> {
         if !self
             .unified_addresses
             .values()
             .any(|address| address.sapling().is_some())
         {
-            self.generate_unified_address(ReceiverSelection::sapling_only(), zip32::AccountId::ZERO)
-                .expect("wallet should be able to derive a Sapling receiver for shielding change");
+            self.generate_unified_address(
+                ReceiverSelection::sapling_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
+            .expect("wallet should be able to derive a Sapling receiver for shielding change");
         }
 
         let input_selector = GreedyInputSelector::new();
@@ -105,6 +121,9 @@ impl LightWallet {
                     .expect("incorrect network should be checked on wallet load"))
             })
             .collect::<Result<Vec<_>, zcash_address::ParseError>>()?;
+
+        let previous_restriction =
+            std::mem::replace(&mut self.spend_restriction.transparent, restriction);
 
         let proposed_shield = zcash_client_backend::data_api::wallet::propose_shielding::<
             LightWallet,
@@ -139,6 +158,8 @@ impl LightWallet {
                 return Err(ProposeShieldError::Insufficient);
             }
         }
+
+        self.spend_restriction.transparent = previous_restriction;
 
         Ok(proposed_shield)
     }

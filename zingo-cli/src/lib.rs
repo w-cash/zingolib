@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 mod commands;
+pub use commands::{Command, get_commands};
 
 #[cfg(feature = "regtest")]
 mod regtest;

@@ -121,7 +121,10 @@ async fn zebrad_shielded_funds<V, I>(
     if !matches!(mine_to_pool, PoolType::Transparent) {
         local_net.validator().generate_blocks(100).await.unwrap();
         faucet.sync_and_await().await.unwrap();
-        faucet.quick_shield(zip32::AccountId::ZERO).await.unwrap();
+        faucet
+            .quick_shield(zip32::AccountId::ZERO, None)
+            .await
+            .unwrap();
         local_net.validator().generate_blocks(1).await.unwrap();
         faucet.sync_and_await().await.unwrap();
         quick_send(faucet, vec![(FUND_OFFLOAD_ORCHARD_ONLY, 624_960_000, None)])
@@ -224,7 +227,11 @@ impl ClientBuilder {
         )
         .unwrap();
         wallet
-            .generate_unified_address(ReceiverSelection::sapling_only(), zip32::AccountId::ZERO)
+            .generate_unified_address(
+                ReceiverSelection::sapling_only(),
+                zip32::AccountId::ZERO,
+                None,
+            )
             .unwrap();
 
         LightClient::create_from_wallet(wallet, config, overwrite).unwrap()
@@ -741,7 +748,7 @@ pub async fn funded_orchard_sapling_transparent_shielded_mobileclient(
 
     // // shield transparent
     recipient
-        .quick_shield(zip32::AccountId::ZERO)
+        .quick_shield(zip32::AccountId::ZERO, None)
         .await
         .unwrap();
     increase_height_and_wait_for_client(&local_net, &mut recipient, 1)

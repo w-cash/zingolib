@@ -1,5 +1,9 @@
 //! All things needed to create, manaage, and use notes
 
+use std::convert::TryFrom;
+
+use orchard::keys::FullViewingKey;
+use sapling_crypto::zip32::DiversifiableFullViewingKey;
 use shardtree::store::ShardStore;
 use zcash_primitives::consensus::BlockHeight;
 use zcash_primitives::transaction::TxId;
@@ -12,16 +16,74 @@ use super::LightWallet;
 use super::error::WalletError;
 use super::transaction::transaction_unspent_coins;
 use super::transaction::transaction_unspent_notes;
-use pepper_sync::wallet::NoteInterface;
-use pepper_sync::wallet::OutputId;
-use pepper_sync::wallet::OutputInterface;
-use pepper_sync::wallet::TransparentCoin;
-use pepper_sync::wallet::WalletTransaction;
+use crate::wallet::keys::unified::UnifiedKeyStore;
+use pepper_sync::keys::KeyId;
+use pepper_sync::wallet::{
+    KeyIdInterface, NoteInterface, OrchardNote, OutputId, OutputInterface, SaplingNote,
+    TransparentCoin, WalletTransaction,
+};
 use query::OutputQuery;
 use query::OutputSpendStatusQuery;
 use zingo_status::confirmation_status::ConfirmationStatus;
 
 pub mod query;
+
+pub(crate) trait ShieldedNoteAdapter: NoteInterface<KeyId = KeyId> {
+    fn derive_diversifier_index(
+        key_store: &UnifiedKeyStore,
+        key_id: &KeyId,
+        note: &Self::ZcashNote,
+    ) -> Option<zip32::DiversifierIndex>;
+
+    fn unified_index_from_diversifier(
+        key_store: &UnifiedKeyStore,
+        _account_id: zip32::AccountId,
+        diversifier_index: zip32::DiversifierIndex,
+    ) -> Option<u32>;
+}
+
+impl ShieldedNoteAdapter for OrchardNote {
+    fn derive_diversifier_index(
+        key_store: &UnifiedKeyStore,
+        key_id: &KeyId,
+        note: &Self::ZcashNote,
+    ) -> Option<zip32::DiversifierIndex> {
+        let fvk = FullViewingKey::try_from(key_store).ok()?;
+        let recipient = note.recipient();
+        fvk.to_ivk(key_id.scope).diversifier_index(&recipient)
+    }
+
+    fn unified_index_from_diversifier(
+        _key_store: &UnifiedKeyStore,
+        _account_id: zip32::AccountId,
+        diversifier_index: zip32::DiversifierIndex,
+    ) -> Option<u32> {
+        u32::try_from(diversifier_index).ok()
+    }
+}
+
+impl ShieldedNoteAdapter for SaplingNote {
+    fn derive_diversifier_index(
+        key_store: &UnifiedKeyStore,
+        _key_id: &KeyId,
+        note: &Self::ZcashNote,
+    ) -> Option<zip32::DiversifierIndex> {
+        let dfvk = DiversifiableFullViewingKey::try_from(key_store).ok()?;
+        let recipient = note.recipient();
+        dfvk.decrypt_diversifier(&recipient).map(|(index, _)| index)
+    }
+
+    fn unified_index_from_diversifier(
+        key_store: &UnifiedKeyStore,
+        _account_id: zip32::AccountId,
+        diversifier_index: zip32::DiversifierIndex,
+    ) -> Option<u32> {
+        let ordinal = key_store
+            .determine_nth_valid_sapling_diversifier(diversifier_index)
+            .ok()?;
+        ordinal.checked_sub(1)
+    }
+}
 
 /// Output reference.
 ///
@@ -229,6 +291,43 @@ impl LightWallet {
         }
     }
 
+    fn shielded_note_allowed<N: ShieldedNoteAdapter>(&self, note: &N) -> bool {
+        if let Some(filter) = &self.spend_restriction.shielded {
+            if note.key_id().account_id() != filter.account {
+                return false;
+            }
+            return self
+                .note_unified_index(note)
+                .is_some_and(|index| filter.contains(index));
+        }
+        true
+    }
+
+    fn transparent_coin_allowed(&self, coin: &TransparentCoin) -> bool {
+        if let Some(filter) = &self.spend_restriction.transparent {
+            return coin.key_id().account_id() == filter.account
+                && coin.key_id().scope() == filter.scope
+                && filter.contains(coin.key_id().address_index().index());
+        }
+        true
+    }
+
+    pub(crate) fn note_unified_index<N: ShieldedNoteAdapter>(&self, note: &N) -> Option<u32> {
+        let diversifier_index = note
+            .diversifier_index()
+            .or_else(|| self.derive_diversifier_index(note))?;
+        let key_store = self.unified_key_store.get(&note.key_id().account_id())?;
+        N::unified_index_from_diversifier(key_store, note.key_id().account_id(), diversifier_index)
+    }
+
+    fn derive_diversifier_index<N: ShieldedNoteAdapter>(
+        &self,
+        note: &N,
+    ) -> Option<zip32::DiversifierIndex> {
+        let key_store = self.unified_key_store.get(&note.key_id().account_id())?;
+        N::derive_diversifier_index(key_store, &note.key_id(), note.note())
+    }
+
     /// Returns all spendable notes of the specified shielded pool and `account` confirmed at or below `anchor_height`.
     ///
     /// Any notes with output IDs in `exclude` will not be returned.
@@ -237,7 +336,7 @@ impl LightWallet {
     /// If `include_potentially_spent_notes` is `true`, notes will be included even if the wallet's current sync state
     /// cannot guarantee the notes are unspent.
     #[allow(clippy::result_large_err)]
-    pub(crate) fn spendable_notes<'a, N: NoteInterface>(
+    pub(crate) fn spendable_notes<'a, N: ShieldedNoteAdapter>(
         &'a self,
         anchor_height: BlockHeight,
         exclude: &'a [OutputId],
@@ -301,6 +400,7 @@ impl LightWallet {
                             transaction.status().get_height(),
                             anchor_height,
                         )
+                        && self.shielded_note_allowed(note)
                 })
             })
             .collect())
@@ -348,6 +448,8 @@ impl LightWallet {
                     Vec::new()
                 }
             })
+            .into_iter()
+            .filter(|coin| self.transparent_coin_allowed(coin))
             .collect()
     }
 
@@ -357,7 +459,7 @@ impl LightWallet {
     /// Selects notes with smallest value that satisfies the target value, without creating dust as change. Otherwise,
     /// selects the note with the largest value and repeats.
     #[allow(clippy::result_large_err)]
-    pub(crate) fn select_spendable_notes_by_pool<'a, N: NoteInterface>(
+    pub(crate) fn select_spendable_notes_by_pool<'a, N: ShieldedNoteAdapter>(
         &'a self,
         remaining_value_needed: &mut RemainingNeeded,
         anchor_height: BlockHeight,

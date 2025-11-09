@@ -565,7 +565,7 @@ pub mod scenarios {
             };
             // upgrade sapling
             lightclient
-                .quick_shield(zip32::AccountId::ZERO)
+                .quick_shield(zip32::AccountId::ZERO, None)
                 .await
                 .unwrap();
             let mut streamed_raw_txns = self

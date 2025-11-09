@@ -1134,7 +1134,7 @@ async fn update_wallet_data<W>(
     scan_range: &ScanRange,
     nullifiers: Option<&mut NullifierMap>,
     mut outpoints: BTreeMap<OutputId, ScanTarget>,
-    transactions: HashMap<TxId, WalletTransaction>,
+    mut transactions: HashMap<TxId, WalletTransaction>,
     sapling_located_trees: Vec<LocatedTreeData<sapling_crypto::Node>>,
     orchard_located_trees: Vec<LocatedTreeData<MerkleHashOrchard>>,
 ) -> Result<(), SyncError<W::Error>>
@@ -1161,7 +1161,7 @@ where
             transaction,
         );
     }
-    for transaction in transactions.values() {
+    for transaction in transactions.values_mut() {
         discover_unified_addresses(wallet, ufvks, transaction).map_err(SyncError::WalletError)?;
     }
 
@@ -1192,15 +1192,15 @@ where
 fn discover_unified_addresses<W>(
     wallet: &mut W,
     ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
-    transaction: &WalletTransaction,
+    transaction: &mut WalletTransaction,
 ) -> Result<(), W::Error>
 where
     W: SyncWallet,
 {
     for note in transaction
-        .orchard_notes()
-        .iter()
-        .filter(|&note| note.key_id().scope == zip32::Scope::External)
+        .orchard_notes_mut()
+        .into_iter()
+        .filter(|note| note.key_id().scope == zip32::Scope::External)
     {
         let ivk = ufvks
             .get(&note.key_id().account_id())
@@ -1208,18 +1208,21 @@ where
             .orchard()
             .expect("fvk must exist to decrypt this note")
             .to_ivk(zip32::Scope::External);
+        let diversifier_index = ivk
+            .diversifier_index(&note.note().recipient())
+            .expect("must be key used to create this address");
 
         wallet.add_orchard_address(
             note.key_id().account_id(),
             note.note().recipient(),
-            ivk.diversifier_index(&note.note().recipient())
-                .expect("must be key used to create this address"),
+            diversifier_index,
         )?;
+        note.set_diversifier_index(Some(diversifier_index));
     }
     for note in transaction
-        .sapling_notes()
-        .iter()
-        .filter(|&note| note.key_id().scope == zip32::Scope::External)
+        .sapling_notes_mut()
+        .into_iter()
+        .filter(|note| note.key_id().scope == zip32::Scope::External)
     {
         let ivk = ufvks
             .get(&note.key_id().account_id())
@@ -1227,13 +1230,15 @@ where
             .sapling()
             .expect("fvk must exist to decrypt this note")
             .to_external_ivk();
-
+        let diversifier_index = ivk
+            .decrypt_diversifier(&note.note().recipient())
+            .expect("must be key used to create this address");
         wallet.add_sapling_address(
             note.key_id().account_id(),
             note.note().recipient(),
-            ivk.decrypt_diversifier(&note.note().recipient())
-                .expect("must be key used to create this address"),
+            diversifier_index,
         )?;
+        note.set_diversifier_index(Some(diversifier_index));
     }
 
     Ok(())
