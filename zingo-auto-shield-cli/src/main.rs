@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::BTreeSet,
     fs,
     num::NonZeroU32,
     path::{Path, PathBuf},
@@ -24,7 +25,7 @@ use log4rs::{
 use pepper_sync::{
     activation::{set_orchard_activation_height, set_sapling_activation_height},
     config::{PerformanceLevel, SyncConfig, TransparentAddressDiscovery},
-    keys::transparent::{self, TransparentScope},
+    keys::transparent::{self, TransparentAddressId, TransparentScope},
 };
 use rand::Rng;
 use reqwest::blocking::Client;
@@ -290,6 +291,7 @@ struct AutoShieldRunner {
     processed: ProcessedBlocks,
     rewards: RewardLog,
     queue: ShieldQueue,
+    needs_reward_rescan: bool,
     shutdown_flag: Arc<AtomicBool>,
 }
 
@@ -344,7 +346,7 @@ impl AutoShieldRunner {
         let rewards = RewardLog::load(&config.rewards_log)?;
         let queue = ShieldQueue::load(&config.queue_log)?;
 
-        Ok(Self {
+        let mut runner = Self {
             rpc: NodeRpcClient::new(&config.rpc_url)?,
             config,
             runtime,
@@ -352,8 +354,22 @@ impl AutoShieldRunner {
             processed,
             rewards,
             queue,
+            needs_reward_rescan: false,
             shutdown_flag,
-        })
+        };
+
+        runner.ensure_tracked_indices_for_queue()?;
+
+        if !runner.queue.pending.is_empty() {
+            info!(
+                "Queued shields detected on startup; running rescan to backfill transparent rewards."
+            );
+            runner
+                .runtime
+                .block_on(runner.lightclient.rescan_and_await())
+                .context("startup rescan for existing shield queue")?;
+        }
+        Ok(runner)
     }
 
     fn should_shutdown(&self) -> bool {
@@ -364,6 +380,20 @@ impl AutoShieldRunner {
         self.runtime
             .block_on(self.lightclient.shutdown_save_task())
             .context("shutting down wallet")?;
+        Ok(())
+    }
+
+    fn rescan_tracked_rewards_if_needed(&mut self) -> Result<()> {
+        if !self.needs_reward_rescan {
+            return Ok(());
+        }
+        info!(
+            "New transparent reward addresses detected; rescanning wallet to import historical UTXOs."
+        );
+        self.runtime
+            .block_on(self.lightclient.rescan_and_await())
+            .context("rescanning after tracking new reward addresses")?;
+        self.needs_reward_rescan = false;
         Ok(())
     }
 
@@ -417,6 +447,9 @@ impl AutoShieldRunner {
         }
 
         if !self.should_shutdown() {
+            self.rescan_tracked_rewards_if_needed()?;
+        }
+        if !self.should_shutdown() {
             self.process_queue()?;
         }
         Ok(())
@@ -461,6 +494,10 @@ impl AutoShieldRunner {
             } else if self.queue.contains_height(height) {
                 info!("Height {height} already queued for shielding.");
             } else {
+                let tracked_new_index = self.track_transparent_index(height)?;
+                if tracked_new_index {
+                    self.needs_reward_rescan = true;
+                }
                 let total_value: i64 = matched_outputs.iter().map(|o| o.value_zat).sum();
                 self.schedule_shield(height, &block_hash, &derived_address, total_value)?;
             }
@@ -603,6 +640,58 @@ impl AutoShieldRunner {
             .generate_transparent_address(nh_index, TransparentScope::External)
             .context("deriving transparent address")?;
         Ok(transparent::encode_address(&wallet.network, raw_address))
+    }
+
+    fn track_transparent_index(&mut self, index: u32) -> Result<bool> {
+        let nh_index = NonHardenedChildIndex::from_index(index)
+            .ok_or_else(|| anyhow!("index {index} exceeds NonHardenedChildIndex bounds"))?;
+
+        let already_known = self.runtime.block_on(async {
+            let wallet = self.lightclient.wallet.read().await;
+            let id =
+                TransparentAddressId::new(AccountId::ZERO, TransparentScope::External, nh_index);
+            wallet.transparent_addresses().contains_key(&id)
+        });
+
+        if already_known {
+            return Ok(false);
+        }
+
+        self.runtime
+            .block_on(self.lightclient.generate_transparent_address(
+                AccountId::ZERO,
+                false,
+                Some(index),
+            ))
+            .with_context(|| format!("tracking transparent index {index}"))?;
+        Ok(true)
+    }
+
+    fn ensure_tracked_indices_for_queue(&mut self) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        let mut derived_new = false;
+        let heights: Vec<u32> = self
+            .queue
+            .pending
+            .iter()
+            .map(|entry| entry.height)
+            .collect();
+        for height in heights {
+            if seen.insert(height) && self.track_transparent_index(height)? {
+                derived_new = true;
+            }
+        }
+
+        if derived_new {
+            info!(
+                "Derived new transparent indices for queued rewards; running rescan to backfill UTXOs."
+            );
+            self.runtime
+                .block_on(self.lightclient.rescan_and_await())
+                .context("rescanning after deriving transparent backlog")?;
+        }
+
+        Ok(())
     }
 
     fn trigger_shield(&mut self, index: u32) -> Result<Vec<String>> {
