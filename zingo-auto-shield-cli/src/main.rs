@@ -37,7 +37,7 @@ use zcash_primitives::legacy::keys::NonHardenedChildIndex;
 use zcash_protocol::consensus::BlockHeight;
 use zingolib::{
     config::{self, ChainType, chain_from_str, construct_lightwalletd_uri},
-    lightclient::LightClient,
+    lightclient::{LightClient, error::LightClientError},
     wallet::{
         LightWallet, WalletBase, WalletSettings, restrictions::TransparentAddressRestriction,
     },
@@ -338,9 +338,12 @@ impl AutoShieldRunner {
         };
 
         runtime.block_on(lightclient.save_task());
-        runtime
-            .block_on(lightclient.sync_and_await())
-            .context("initial sync")?;
+        run_wallet_sync(
+            &runtime,
+            &mut lightclient,
+            WalletSyncOp::Sync,
+            "initial sync",
+        )?;
 
         let processed = ProcessedBlocks::load(&config.processed_log)?;
         let rewards = RewardLog::load(&config.rewards_log)?;
@@ -364,10 +367,12 @@ impl AutoShieldRunner {
             info!(
                 "Queued shields detected on startup; running rescan to backfill transparent rewards."
             );
-            runner
-                .runtime
-                .block_on(runner.lightclient.rescan_and_await())
-                .context("startup rescan for existing shield queue")?;
+            run_wallet_sync(
+                &runner.runtime,
+                &mut runner.lightclient,
+                WalletSyncOp::Rescan,
+                "startup rescan for existing shield queue",
+            )?;
         }
         Ok(runner)
     }
@@ -390,9 +395,12 @@ impl AutoShieldRunner {
         info!(
             "New transparent reward addresses detected; rescanning wallet to import historical UTXOs."
         );
-        self.runtime
-            .block_on(self.lightclient.rescan_and_await())
-            .context("rescanning after tracking new reward addresses")?;
+        run_wallet_sync(
+            &self.runtime,
+            &mut self.lightclient,
+            WalletSyncOp::Rescan,
+            "rescanning after tracking new reward addresses",
+        )?;
         self.needs_reward_rescan = false;
         Ok(())
     }
@@ -615,6 +623,20 @@ impl AutoShieldRunner {
                             entry.height, extra_minutes
                         );
                         extra_minutes * 60
+                    } else if is_missing_backend_transaction(&err_txt) {
+                        let retry_minutes = self.config.delay_min_minutes.max(30) as u64;
+                        if let Some(txid) = extract_txid_from_error(&err_txt) {
+                            warn!(
+                                "Backend could not supply transaction {txid} for height {}. Backend reindex or txindex=1 may be required; retrying in {} minutes.",
+                                entry.height, retry_minutes
+                            );
+                        } else {
+                            warn!(
+                                "Backend missing transaction data for height {}; retrying in {} minutes.",
+                                entry.height, retry_minutes
+                            );
+                        }
+                        retry_minutes * 60
                     } else {
                         self.config.random_delay_secs()
                     };
@@ -686,9 +708,12 @@ impl AutoShieldRunner {
             info!(
                 "Derived new transparent indices for queued rewards; running rescan to backfill UTXOs."
             );
-            self.runtime
-                .block_on(self.lightclient.rescan_and_await())
-                .context("rescanning after deriving transparent backlog")?;
+            run_wallet_sync(
+                &self.runtime,
+                &mut self.lightclient,
+                WalletSyncOp::Rescan,
+                "rescanning after deriving transparent backlog",
+            )?;
         }
 
         Ok(())
@@ -696,9 +721,12 @@ impl AutoShieldRunner {
 
     fn trigger_shield(&mut self, index: u32) -> Result<Vec<String>> {
         info!("Triggering quick_shield for index {index}.");
-        self.runtime
-            .block_on(self.lightclient.sync_and_await())
-            .context("sync before shielding")?;
+        run_wallet_sync(
+            &self.runtime,
+            &mut self.lightclient,
+            WalletSyncOp::Sync,
+            "sync before shielding",
+        )?;
 
         let restriction = TransparentAddressRestriction::new(
             AccountId::ZERO,
@@ -715,12 +743,105 @@ impl AutoShieldRunner {
             )
             .map_err(|e| anyhow!("quick_shield failed: {e:?}"))?;
 
-        self.runtime
-            .block_on(self.lightclient.sync_and_await())
-            .context("sync after shielding")?;
+        run_wallet_sync(
+            &self.runtime,
+            &mut self.lightclient,
+            WalletSyncOp::Sync,
+            "sync after shielding",
+        )?;
 
         Ok(txids.into_iter().map(|txid| txid.to_string()).collect())
     }
+}
+
+enum WalletSyncOp {
+    Sync,
+    Rescan,
+}
+
+fn run_wallet_sync(
+    runtime: &Runtime,
+    lightclient: &mut LightClient,
+    op: WalletSyncOp,
+    context: &'static str,
+) -> Result<()> {
+    run_wallet_sync_inner(runtime, lightclient, op, context, true)
+}
+
+fn run_wallet_sync_inner(
+    runtime: &Runtime,
+    lightclient: &mut LightClient,
+    op: WalletSyncOp,
+    context: &'static str,
+    allow_note_recovery: bool,
+) -> Result<()> {
+    let result = match op {
+        WalletSyncOp::Sync => runtime.block_on(lightclient.sync_and_await()),
+        WalletSyncOp::Rescan => runtime.block_on(lightclient.rescan_and_await()),
+    };
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            handle_wallet_sync_error(runtime, lightclient, context, err, allow_note_recovery)
+        }
+    }
+}
+
+fn handle_wallet_sync_error(
+    runtime: &Runtime,
+    lightclient: &mut LightClient,
+    context: &'static str,
+    err: LightClientError,
+    allow_note_recovery: bool,
+) -> Result<()> {
+    let err_text = err.to_string();
+    if is_missing_backend_transaction(&err_text) {
+        log_missing_backend_transaction(context, &err_text);
+        Ok(())
+    } else if allow_note_recovery && is_missing_note_metadata(&err_text) {
+        warn!(
+            "{context} hit missing decrypted note metadata ({err_text}); running full rescan and continuing."
+        );
+        run_wallet_sync_inner(
+            runtime,
+            lightclient,
+            WalletSyncOp::Rescan,
+            "recovery rescan after missing note metadata",
+            false,
+        )
+        .with_context(|| format!("{context} recovery rescan"))?;
+        Ok(())
+    } else {
+        Err::<(), LightClientError>(err).context(context)
+    }
+}
+
+fn log_missing_backend_transaction(context: &str, err_text: &str) {
+    if let Some(txid) = extract_txid_from_error(err_text) {
+        warn!(
+            "{context} hit missing backend transaction {txid}; backend reindex or txindex=1 may be required. Continuing."
+        );
+    } else {
+        warn!(
+            "{context} hit missing backend transaction data; backend reindex or txindex=1 may be required. Continuing. ({err_text})"
+        );
+    }
+}
+
+fn is_missing_backend_transaction(err_text: &str) -> bool {
+    err_text.contains("No such mempool or main chain transaction")
+}
+
+fn is_missing_note_metadata(err_text: &str) -> bool {
+    err_text.contains("decrypted note nullifier and position data not found")
+}
+
+fn extract_txid_from_error(err_text: &str) -> Option<String> {
+    err_text
+        .split(|c: char| c == ' ' || c == '"' || c == '\n' || c == ':' || c == ',')
+        .find(|token| token.len() == 64 && token.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Default, Serialize, Deserialize)]
