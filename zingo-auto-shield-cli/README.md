@@ -42,6 +42,7 @@ reschedule_grace_minutes = 5
 * `poll_interval_seconds`: how long to sleep between scans once the daemon is caught up.
 * `delay_min_minutes` / `delay_max_minutes`: randomized wait window applied to each reward before shielding. (Keeps observable shielding times de-correlated from block finds.)
 * `reschedule_grace_minutes`: if the CLI restarts and finds a pending entry whose timer elapsed more than this many minutes ago, it re-rolls a new random delay before shielding (so downtime doesn’t reveal which miner was offline).
+* `post_shield_send_address`: optional. When set, every successful shield queues a follow-up send of exactly 6.25 ZEC to this address using its own log (`post_shield_send_log`, default `post_shield_send_log.json`) and queue (`post_shield_send_queue_log`, default `post_shield_queue.json`). The follow-up send obeys its own randomized delay window (`post_shield_send_delay_min_minutes`/`post_shield_send_delay_max_minutes`; default 200-14,400 minutes) and reuses the same grace/retiming rules as the shield queue.
 * `sapling_activation_height` / `orchard_activation_height`: optional overrides for local/dev networks—when set, the CLI programs the activation heights internally (no shell env tweaks needed).
 
 `processed_log` records every block height the tool evaluated. `rewards_log` records the block hash / height pairs that matched the derived payout address and the txids produced by the automatic shield transaction.
@@ -62,6 +63,8 @@ Once running, the daemon:
 4. When a match is found, it records the block in `queue_log` with a randomized execution time (between `delay_min_minutes` and `delay_max_minutes` minutes in the future).
 5. Every processed height is appended to `processed_log`, allowing subsequent passes to resume where they left off. When the queue timer elapses *while the daemon is running*, the entry triggers a `quick_shield` restricted to that transparent index and the execution is appended to `rewards_log`. If the daemon wakes up long after the scheduled time, it re-rolls a new delay (respecting the grace window) before shielding so on-chain timing remains obfuscated.
 
+If `post_shield_send_address` is populated, each successful shield also queues a fixed 6.25 ZEC send to that address. Those follow-up sends live in `post_shield_queue.json`, inherit their own randomized delay window, and write successful executions to `post_shield_send_log.json`. Missing funds, missing backend data, and overdue timers follow the same retry logic the shield queue uses.
+
 If a queued shield fails because the funds are not yet spendable (`InsufficientFunds`), the daemon automatically postpones that entry for an additional `delay_max_minutes + 150` minutes so mature rewards can proceed before it retries.
 
 The process stays alive until you press `Ctrl+C`. `poll_interval_seconds` controls how long it sleeps between scans once it has reached the tip.
@@ -74,4 +77,4 @@ If a block pays to an index that never saw funds (e.g., the miner skipped a heig
 
 ## Continuous operation
 
-Because `processed_blocks.json`, `shield_queue.json`, and `reward_blocks.json` live under `state_dir`, each restart is idempotent—already-shielded heights are skipped automatically and pending entries resume their timers. The persistent log (`log_file`) continues across restarts, making it easy to audit what happened even after days of uptime.
+Because `processed_blocks.json`, `shield_queue.json`, `post_shield_queue.json`, `reward_blocks.json`, and (optionally) `post_shield_send_log.json` live under `state_dir`, each restart is idempotent—already-shielded heights are skipped automatically and pending entries resume their timers. The persistent log (`log_file`) continues across restarts, making it easy to audit what happened even after days of uptime.

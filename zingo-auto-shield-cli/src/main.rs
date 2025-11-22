@@ -33,11 +33,14 @@ use rpassword::prompt_password;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::runtime::Runtime;
+use zcash_address::ZcashAddress;
 use zcash_primitives::legacy::keys::NonHardenedChildIndex;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 use zingolib::{
     config::{self, ChainType, chain_from_str, construct_lightwalletd_uri},
+    data::receivers::{Receiver, transaction_request_from_receivers},
     lightclient::{LightClient, error::LightClientError},
+    utils::conversion::address_from_str,
     wallet::{
         LightWallet, WalletBase, WalletSettings, restrictions::TransparentAddressRestriction,
     },
@@ -50,6 +53,8 @@ struct Cli {
     #[arg(long, default_value = "auto-shield-config.toml")]
     config: PathBuf,
 }
+
+const POST_SHIELD_SEND_AMOUNT_ZATS: u64 = 625_000_000; // 6.25 WEC
 
 fn main() {
     if let Err(e) = run() {
@@ -117,6 +122,11 @@ struct FileConfig {
     delay_max_minutes: Option<u32>,
     reschedule_grace_minutes: Option<u32>,
     poll_interval_seconds: Option<u64>,
+    post_shield_send_address: Option<String>,
+    post_shield_send_queue_log: Option<PathBuf>,
+    post_shield_send_log: Option<PathBuf>,
+    post_shield_send_delay_min_minutes: Option<u32>,
+    post_shield_send_delay_max_minutes: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -138,6 +148,32 @@ struct AutoShieldConfig {
     delay_max_minutes: u32,
     reschedule_grace_secs: u64,
     poll_interval: Duration,
+    post_shield_send: Option<PostShieldSendConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct PostShieldSendConfig {
+    address: ZcashAddress,
+    queue_log: PathBuf,
+    log_file: PathBuf,
+    delay_min_minutes: u32,
+    delay_max_minutes: u32,
+}
+
+impl PostShieldSendConfig {
+    fn random_delay_secs(&self) -> u64 {
+        let mut rng = rand::thread_rng();
+        let minutes = rng.gen_range(self.delay_min_minutes..=self.delay_max_minutes) as u64;
+        minutes * 60
+    }
+
+    fn queue_log_path(&self) -> &Path {
+        &self.queue_log
+    }
+
+    fn log_path(&self) -> &Path {
+        &self.log_file
+    }
 }
 
 impl AutoShieldConfig {
@@ -197,6 +233,51 @@ impl AutoShieldConfig {
         let grace_minutes = file_cfg.reschedule_grace_minutes.unwrap_or(5);
         let poll_interval_secs = file_cfg.poll_interval_seconds.unwrap_or(60).max(1);
 
+        let post_shield_send = if let Some(address_text) = file_cfg
+            .post_shield_send_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|addr| !addr.is_empty())
+        {
+            let address = address_from_str(address_text)
+                .with_context(|| format!("invalid post_shield_send_address '{}'", address_text))?;
+            let send_delay_min = file_cfg.post_shield_send_delay_min_minutes.unwrap_or(200);
+            let send_delay_max = file_cfg
+                .post_shield_send_delay_max_minutes
+                .unwrap_or(14_400);
+            if send_delay_min == 0 {
+                return Err(anyhow!(
+                    "post_shield_send_delay_min_minutes must be > 0 when configured"
+                ));
+            }
+            if send_delay_max < send_delay_min {
+                return Err(anyhow!(
+                    "post_shield_send_delay_max_minutes ({send_delay_max}) must be >= post_shield_send_delay_min_minutes ({send_delay_min})"
+                ));
+            }
+            let queue_log = resolve_path(
+                &state_dir,
+                file_cfg
+                    .post_shield_send_queue_log
+                    .unwrap_or_else(|| "post_shield_queue.json".into()),
+            );
+            let log_file = resolve_path(
+                &state_dir,
+                file_cfg
+                    .post_shield_send_log
+                    .unwrap_or_else(|| "post_shield_send_log.json".into()),
+            );
+            Some(PostShieldSendConfig {
+                address,
+                queue_log,
+                log_file,
+                delay_min_minutes: send_delay_min,
+                delay_max_minutes: send_delay_max,
+            })
+        } else {
+            None
+        };
+
         let chain = chain_from_str(&file_cfg.chain)
             .map_err(|e| anyhow!("invalid chain '{}': {}", file_cfg.chain, e))?;
         let lwd_uri = construct_lightwalletd_uri(Some(file_cfg.lightwalletd_server));
@@ -227,6 +308,7 @@ impl AutoShieldConfig {
             delay_max_minutes: delay_max,
             reschedule_grace_secs: grace_minutes as u64 * 60,
             poll_interval: Duration::from_secs(poll_interval_secs),
+            post_shield_send,
         })
     }
 
@@ -291,8 +373,23 @@ struct AutoShieldRunner {
     processed: ProcessedBlocks,
     rewards: RewardLog,
     queue: ShieldQueue,
+    post_shield_send: Option<PostShieldSendState>,
     needs_reward_rescan: bool,
     shutdown_flag: Arc<AtomicBool>,
+}
+
+struct PostShieldSendState {
+    config: PostShieldSendConfig,
+    queue: SendQueue,
+    log: SendLog,
+}
+
+impl PostShieldSendState {
+    fn new(config: PostShieldSendConfig) -> Result<Self> {
+        let queue = SendQueue::load(config.queue_log_path())?;
+        let log = SendLog::load(config.log_path())?;
+        Ok(Self { config, queue, log })
+    }
 }
 
 impl AutoShieldRunner {
@@ -348,6 +445,10 @@ impl AutoShieldRunner {
         let processed = ProcessedBlocks::load(&config.processed_log)?;
         let rewards = RewardLog::load(&config.rewards_log)?;
         let queue = ShieldQueue::load(&config.queue_log)?;
+        let post_shield_send = match config.post_shield_send.clone() {
+            Some(cfg) => Some(PostShieldSendState::new(cfg)?),
+            None => None,
+        };
 
         let mut runner = Self {
             rpc: NodeRpcClient::new(&config.rpc_url)?,
@@ -357,11 +458,13 @@ impl AutoShieldRunner {
             processed,
             rewards,
             queue,
+            post_shield_send,
             needs_reward_rescan: false,
             shutdown_flag,
         };
 
         runner.ensure_tracked_indices_for_queue()?;
+        runner.backfill_post_shield_queue_from_rewards()?;
 
         if !runner.queue.pending.is_empty() {
             info!(
@@ -459,6 +562,9 @@ impl AutoShieldRunner {
         }
         if !self.should_shutdown() {
             self.process_queue()?;
+        }
+        if !self.should_shutdown() {
+            self.process_post_shield_send_queue()?;
         }
         Ok(())
     }
@@ -608,6 +714,7 @@ impl AutoShieldRunner {
                         "Shielded queued reward at height {} (scheduled {}, executed {}).",
                         entry.height, entry.scheduled_at, executed_at
                     );
+                    self.schedule_post_shield_send(entry.height, executed_at)?;
                 }
                 Err(e) => {
                     error!(
@@ -647,6 +754,125 @@ impl AutoShieldRunner {
         }
 
         self.queue.save(&self.config.queue_log)?;
+        Ok(())
+    }
+
+    fn process_post_shield_send_queue(&mut self) -> Result<()> {
+        let mut state = match self.post_shield_send.take() {
+            Some(state) => state,
+            None => return Ok(()),
+        };
+        let result = self.process_post_shield_send_queue_inner(&mut state);
+        self.post_shield_send = Some(state);
+        result
+    }
+
+    fn process_post_shield_send_queue_inner(
+        &mut self,
+        state: &mut PostShieldSendState,
+    ) -> Result<()> {
+        if state.queue.pending.is_empty() || self.should_shutdown() {
+            if self.should_shutdown() && !state.queue.pending.is_empty() {
+                state.queue.save(state.config.queue_log_path())?;
+            }
+            return Ok(());
+        }
+
+        let now = unix_timestamp();
+        let mut retained = Vec::new();
+        let mut due = Vec::new();
+
+        for entry in state.queue.pending.drain(..) {
+            if entry.execute_after > now {
+                retained.push(entry);
+            } else {
+                due.push(entry);
+            }
+        }
+
+        state.queue.pending = retained;
+
+        let mut due_iter = due.into_iter();
+        while let Some(mut entry) = due_iter.next() {
+            if self.should_shutdown() {
+                state.queue.pending.push(entry);
+                state.queue.pending.extend(due_iter);
+                state.queue.save(state.config.queue_log_path())?;
+                return Ok(());
+            }
+
+            if state.log.contains_height(entry.height) {
+                info!(
+                    "Post-shield send for height {} already satisfied; skipping.",
+                    entry.height
+                );
+                continue;
+            }
+
+            let overdue_secs = now.saturating_sub(entry.execute_after);
+            if overdue_secs > self.config.reschedule_grace_secs {
+                entry.execute_after = now + state.config.random_delay_secs();
+                info!(
+                    "Post-shield send for height {} overdue by {}s; re-randomizing execution to {}.",
+                    entry.height, overdue_secs, entry.execute_after
+                );
+                state.queue.pending.push(entry);
+                continue;
+            }
+
+            match self.trigger_post_shield_send(entry.height, &state.config) {
+                Ok(txids) => {
+                    let executed_at = unix_timestamp();
+                    state.log.entries.push(SendEntry {
+                        height: entry.height,
+                        txids,
+                        scheduled_at: entry.scheduled_at,
+                        executed_at,
+                    });
+                    state.log.save(state.config.log_path())?;
+                    info!(
+                        "Completed post-shield send for height {} (scheduled {}, executed {}).",
+                        entry.height, entry.scheduled_at, executed_at
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Post-shield send for height {} failed: {e:?}. Rescheduling.",
+                        entry.height
+                    );
+                    let err_txt = e.to_string();
+                    let delay_secs = if err_txt.contains("InsufficientFunds") {
+                        let extra_minutes =
+                            state.config.delay_max_minutes.saturating_add(150) as u64;
+                        info!(
+                            "Post-shield send for height {} lacked mature funds; delaying {} additional minutes.",
+                            entry.height, extra_minutes
+                        );
+                        extra_minutes * 60
+                    } else if is_missing_backend_transaction(&err_txt) {
+                        let retry_minutes = state.config.delay_min_minutes.max(30) as u64;
+                        if let Some(txid) = extract_txid_from_error(&err_txt) {
+                            warn!(
+                                "Backend could not supply transaction {txid} while sending height {}; retrying in {} minutes.",
+                                entry.height, retry_minutes
+                            );
+                        } else {
+                            warn!(
+                                "Backend missing transaction data while sending height {}; retrying in {} minutes.",
+                                entry.height, retry_minutes
+                            );
+                        }
+                        retry_minutes * 60
+                    } else {
+                        state.config.random_delay_secs()
+                    };
+                    entry.execute_after = unix_timestamp() + delay_secs;
+                    state.queue.pending.push(entry);
+                }
+            }
+        }
+
+        state.queue.save(state.config.queue_log_path())?;
         Ok(())
     }
 
@@ -719,6 +945,38 @@ impl AutoShieldRunner {
         Ok(())
     }
 
+    fn backfill_post_shield_queue_from_rewards(&mut self) -> Result<()> {
+        let Some(state) = self.post_shield_send.as_mut() else {
+            return Ok(());
+        };
+
+        let mut scheduled = 0u32;
+        for reward in &self.rewards.entries {
+            if state.log.contains_height(reward.height)
+                || state.queue.contains_height(reward.height)
+            {
+                continue;
+            }
+            let scheduled_at = reward.executed_at.unwrap_or_else(unix_timestamp);
+            let execute_after = scheduled_at + state.config.random_delay_secs();
+            state.queue.pending.push(QueuedSend {
+                height: reward.height,
+                scheduled_at,
+                execute_after,
+            });
+            scheduled += 1;
+        }
+
+        if scheduled > 0 {
+            state.queue.save(state.config.queue_log_path())?;
+            info!(
+                "Backfilled {} post-shield send entries from reward log.",
+                scheduled
+            );
+        }
+        Ok(())
+    }
+
     fn trigger_shield(&mut self, index: u32) -> Result<Vec<String>> {
         info!("Triggering quick_shield for index {index}.");
         run_wallet_sync(
@@ -748,6 +1006,85 @@ impl AutoShieldRunner {
             &mut self.lightclient,
             WalletSyncOp::Sync,
             "sync after shielding",
+        )?;
+
+        Ok(txids.into_iter().map(|txid| txid.to_string()).collect())
+    }
+
+    fn schedule_post_shield_send(&mut self, height: u32, scheduled_at: u64) -> Result<()> {
+        let Some(state) = self.post_shield_send.as_mut() else {
+            return Ok(());
+        };
+
+        if state.log.contains_height(height) {
+            info!(
+                "Post-shield send for height {} already recorded; skipping queue.",
+                height
+            );
+            return Ok(());
+        }
+        if state.queue.contains_height(height) {
+            info!(
+                "Post-shield send for height {} already queued; skipping new entry.",
+                height
+            );
+            return Ok(());
+        }
+
+        let execute_after = scheduled_at + state.config.random_delay_secs();
+        let delay_minutes = (execute_after - scheduled_at) / 60;
+        state.queue.pending.push(QueuedSend {
+            height,
+            scheduled_at,
+            execute_after,
+        });
+        state.queue.save(state.config.queue_log_path())?;
+        info!(
+            "Queued height {} for delayed post-shield send in ~{} minutes (exec at {}).",
+            height, delay_minutes, execute_after
+        );
+        Ok(())
+    }
+
+    fn trigger_post_shield_send(
+        &mut self,
+        height: u32,
+        send_cfg: &PostShieldSendConfig,
+    ) -> Result<Vec<String>> {
+        info!(
+            "Triggering post-shield send for height {} ({} zats).",
+            height, POST_SHIELD_SEND_AMOUNT_ZATS
+        );
+        run_wallet_sync(
+            &self.runtime,
+            &mut self.lightclient,
+            WalletSyncOp::Sync,
+            "sync before post-shield send",
+        )?;
+
+        let amount = Zatoshis::from_u64(POST_SHIELD_SEND_AMOUNT_ZATS).map_err(|_| {
+            anyhow!(
+                "post-shield send amount {} is outside the valid zatoshis range",
+                POST_SHIELD_SEND_AMOUNT_ZATS
+            )
+        })?;
+        let request = transaction_request_from_receivers(vec![Receiver {
+            recipient_address: send_cfg.address.clone(),
+            amount,
+            memo: None,
+        }])
+        .map_err(|e| anyhow!("building post-shield send request failed: {e}"))?;
+
+        let txids = self
+            .runtime
+            .block_on(self.lightclient.quick_send(request, AccountId::ZERO, None))
+            .map_err(|e| anyhow!("post-shield quick_send failed: {e:?}"))?;
+
+        run_wallet_sync(
+            &self.runtime,
+            &mut self.lightclient,
+            WalletSyncOp::Sync,
+            "sync after post-shield send",
         )?;
 
         Ok(txids.into_iter().map(|txid| txid.to_string()).collect())
@@ -933,6 +1270,69 @@ struct QueuedShield {
     value_zat: i64,
     scheduled_at: u64,
     execute_after: u64,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct SendQueue {
+    pending: Vec<QueuedSend>,
+}
+
+impl SendQueue {
+    fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        let json = serde_json::to_vec_pretty(self)?;
+        fs::write(path, json).with_context(|| format!("writing {}", path.display()))
+    }
+
+    fn contains_height(&self, height: u32) -> bool {
+        self.pending.iter().any(|entry| entry.height == height)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct QueuedSend {
+    height: u32,
+    scheduled_at: u64,
+    execute_after: u64,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct SendLog {
+    entries: Vec<SendEntry>,
+}
+
+impl SendLog {
+    fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        let json = serde_json::to_vec_pretty(self)?;
+        fs::write(path, json).with_context(|| format!("writing {}", path.display()))
+    }
+
+    fn contains_height(&self, height: u32) -> bool {
+        self.entries.iter().any(|entry| entry.height == height)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SendEntry {
+    height: u32,
+    txids: Vec<String>,
+    scheduled_at: u64,
+    executed_at: u64,
 }
 
 struct NodeRpcClient {

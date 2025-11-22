@@ -19,6 +19,7 @@ pepper-sync = { path = "../pepper-sync" }
 zingolib = { path = "../zingolib" }
 zcash_primitives = { workspace = true }
 zcash_protocol = { workspace = true }
+zcash_address = { workspace = true }
 zip32 = { workspace = true }
 http = { workspace = true }
 rand = { workspace = true }
